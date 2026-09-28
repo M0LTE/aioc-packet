@@ -126,7 +126,7 @@ python3 $T read 0xC8        # expect 0x00001307 while playing at 48 kHz
 
 The AIOC's runtime DFU interface (interface 6) detaches into the STM32's ROM bootloader, which enumerates as `0483:df11`. Flash starts at 0x08000000, alt setting 0 is the internal flash, and the part has 128 KB.
 
-Note that the full `.bin` is 128000 bytes and ends with the settings page at 0x0801F000 filled with 0xFF. Upstream does this on purpose: flashing it wipes the stored settings, and the AIOC boots with firmware defaults. On the bench unit that changes 0x24 from its stored 0x00000004 back to the default 0x00000404, which adds serial DTR-and-not-RTS as a PTT source. The build notes also give a `keep-settings` image with the settings page left out, which leaves the stored settings as they are.
+Note that the full `.bin` is 128000 bytes and ends with the settings page at 0x0801F000 filled with 0xFF. Upstream does this on purpose: flashing it wipes the stored settings, and the AIOC boots with firmware defaults. On the bench unit that changes 0x24 from its stored 0x00000004 back to the default 0x00000404, which adds serial DTR-and-not-RTS as a PTT source. An image without the settings page leaves the stored settings as they are (the new registers read as zero, so off): `arm-none-eabi-objcopy -O binary -R .eeprom aioc-fw.elf aioc-fw-keep-settings.bin`. DFU only erases the pages it writes.
 
 ```
 # 1. Back up the whole flash, stored settings included (leaves the AIOC in the bootloader)
