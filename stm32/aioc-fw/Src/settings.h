@@ -297,12 +297,54 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
 #define SETTINGS_REG_FOXHUNT_MSG3_CHAR15_OFFS               24
 #define SETTINGS_REG_FOXHUNT_MSG3_CHAR15_MASK               0xFF000000UL
 
+/* TX equaliser coefficients (packet-eq branch, see bench/EQ.md).
+ * Biquad cascade in the playback (USB OUT -> DAC) path. Section k (0..2) at 0xB0 + 5*k holds
+ * b0, b1, b2, a1, a2, each signed 32 bit Q3.29 (1.0 = 0x20000000), for
+ * y = b0 x + b1 x1 + b2 x2 - a1 y1 - a2 y2.
+ * Writing these has no effect until SETTINGS_REG_TXEQ_CTRL changes value. */
+#define SETTINGS_REG_TXEQ_COEF0                             0xB0
+#define SETTINGS_REG_TXEQ_COEF_COUNT                        15
+#define SETTINGS_REG_TXEQ_COEF_DEFAULT                      0
+
+/* TX equaliser control register. All zero = bypass, identical to v1.4.1.
+ * The coefficients are copied, all together between two DAC samples, whenever this register
+ * changes value: write the coefficients first, then this register with a new GEN. The new set
+ * then settles unheard for 4096 samples and crossfades in over 512 (enable and disable too).
+ * It sits above the coefficients so that a flash recall (which copies upwards) sets it last. */
+#define SETTINGS_REG_TXEQ_CTRL                              0xBF
+#define SETTINGS_REG_TXEQ_CTRL_DEFAULT                      0
+/* NSECT: Number of biquad sections in use (0 = bypass, 1..3) */
+#define SETTINGS_REG_TXEQ_CTRL_NSECT_OFFS                   0
+#define SETTINGS_REG_TXEQ_CTRL_NSECT_MASK                   0x00000003UL
+/* GEN: Commit tag. Change it to latch a new coefficient set */
+#define SETTINGS_REG_TXEQ_CTRL_GEN_OFFS                     8
+#define SETTINGS_REG_TXEQ_CTRL_GEN_MASK                     0x0000FF00UL
+/* FS: Sample rate in Hz the coefficients were designed for. The EQ is bypassed while playback
+ * runs at any other rate. 0 = apply at any rate */
+#define SETTINGS_REG_TXEQ_CTRL_FS_OFFS                      16
+#define SETTINGS_REG_TXEQ_CTRL_FS_MASK                      0xFFFF0000UL
+
 /* AIOC debug register 0 */
 #define SETTINGS_REG_INFO_AIOC0                             0xC0
 #define SETTINGS_REG_INFO_AIOC0_DEFAULT                     0
 /* Various digital signal states */
 #define SETTINGS_REG_INFO_AIOC0_PTT1STATE_MASK              0x00010000UL
 #define SETTINGS_REG_INFO_AIOC0_PTT2STATE_MASK              0x00020000UL
+
+/* TX equaliser status register (read only) */
+#define SETTINGS_REG_INFO_TXEQ                              0xC8
+#define SETTINGS_REG_INFO_TXEQ_DEFAULT                      0
+/* Sections in use, filter running (NSECT > 0 and sample rate matches), a change is settling or
+ * crossfading, GEN of the set in use, and the number of saturation events since the last commit
+ * (sticks at 0xFFFF). Updated at every DAC sample, so only while playback is running */
+#define SETTINGS_REG_INFO_TXEQ_NSECT_OFFS                   0
+#define SETTINGS_REG_INFO_TXEQ_NSECT_MASK                   0x00000003UL
+#define SETTINGS_REG_INFO_TXEQ_ACTIVE_MASK                  0x00000004UL
+#define SETTINGS_REG_INFO_TXEQ_FADE_MASK                    0x00000008UL
+#define SETTINGS_REG_INFO_TXEQ_GEN_OFFS                     8
+#define SETTINGS_REG_INFO_TXEQ_GEN_MASK                     0x0000FF00UL
+#define SETTINGS_REG_INFO_TXEQ_CLIPS_OFFS                   16
+#define SETTINGS_REG_INFO_TXEQ_CLIPS_MASK                   0xFFFF0000UL
 
 /* UAC audio debug register 0 */
 #define SETTINGS_REG_INFO_AUDIO0                            0xD0

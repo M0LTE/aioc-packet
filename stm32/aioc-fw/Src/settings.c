@@ -141,8 +141,15 @@ void Settings_Default(void)
     settingsRegMap[SETTINGS_REG_FOXHUNT_MSG2] = SETTINGS_REG_FOXHUNT_MSG2_DEFAULT;
     settingsRegMap[SETTINGS_REG_FOXHUNT_MSG3] = SETTINGS_REG_FOXHUNT_MSG3_DEFAULT;
 
+    /* TX equaliser registers */
+    settingsRegMap[SETTINGS_REG_TXEQ_CTRL] = SETTINGS_REG_TXEQ_CTRL_DEFAULT;
+    for (uint32_t i = 0; i < SETTINGS_REG_TXEQ_COEF_COUNT; i++) {
+        settingsRegMap[SETTINGS_REG_TXEQ_COEF0 + i] = SETTINGS_REG_TXEQ_COEF_DEFAULT;
+    }
+
     /* AIOC Debug registers */
     settingsRegMap[SETTINGS_REG_INFO_AIOC0] = SETTINGS_REG_INFO_AIOC0_DEFAULT;
+    settingsRegMap[SETTINGS_REG_INFO_TXEQ] = SETTINGS_REG_INFO_TXEQ_DEFAULT;
 
     /* Audio Debug registers */
     settingsRegMap[SETTINGS_REG_INFO_AUDIO0] = SETTINGS_REG_INFO_AUDIO0_DEFAULT;

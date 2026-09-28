@@ -5,6 +5,7 @@
 #include "tusb.h"
 #include "usb.h"
 #include "cos.h"
+#include "tx_eq.h"
 #include <math.h>
 
 /* The one and only supported sample rate */
@@ -56,6 +57,7 @@ static volatile uint32_t microphoneSampleFreqCfg; /* Actual configured sample ra
 static volatile uint32_t speakerSampleFreqCfg; /* Actual configured sample rate in the timer hardware. May be different from requested for odd sample rates */
 static volatile state_t microphoneState = STATE_OFF;
 static volatile state_t speakerState = STATE_OFF;
+static txeq_t txEq; /* Playback equaliser, zero-initialised = bypass */
 
 static audio_control_range_4_n_t(SAMPLERATE_COUNT) sampleFreqRng = {
     .wNumSubRanges = SAMPLERATE_COUNT,
@@ -555,6 +557,9 @@ bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received, u
         if (count >= SPEAKER_BUFFERLVL_TARGET) {
             /* Wait until we are at buffer target fill level, then start DAC output */
             speakerState = STATE_RUN;
+            /* Start the TX equaliser afresh with the set in the registers now. The DAC interrupt
+             * is still disabled here, so this cannot race with it */
+            TxEq_Reset(&txEq, settingsRegMap[SETTINGS_REG_TXEQ_CTRL], &settingsRegMap[SETTINGS_REG_TXEQ_COEF0], speakerSampleFreq);
             TX_Config((settingsRegMap[SETTINGS_REG_AUDIO_TX] & SETTINGS_REG_AUDIO_TX_TXBOOST_MASK) ? USB_AUDIO_TXBOOST_ON : USB_AUDIO_TXBOOST_OFF);
             NVIC_EnableIRQ(TIM6_DAC1_IRQn);
 
@@ -788,6 +793,12 @@ void TIM6_DAC_IRQHandler(void)
 
         /* Scale with 16-bit unsigned volume and round */
         sample = (int16_t) (((int32_t) sample * volume + (sample > 0 ? 32768 : -32768)) / 65536);
+
+        /* TX equaliser. Latches new coefficients when the control register changed, passes the
+         * sample through untouched when bypassed */
+        TxEq_Poll(&txEq, settingsRegMap[SETTINGS_REG_TXEQ_CTRL], &settingsRegMap[SETTINGS_REG_TXEQ_COEF0], speakerSampleFreq);
+        sample = TxEq_Process(&txEq, sample);
+        settingsRegMap[SETTINGS_REG_INFO_TXEQ] = TxEq_Status(&txEq);
 
         /* Load DAC holding register with sample */
         DAC1->DHR12L1 = ((int32_t) sample + 32768) & 0xFFFFU;
