@@ -1,4 +1,4 @@
-# TX equaliser (packet-eq branch)
+# TX equaliser
 
 A tunable equaliser in the AIOC's transmit path (USB audio OUT to the DAC, which drives the radio's mic input). It is up to three biquad filters in a row, run on every DAC sample, set through new settings registers. With the registers at their defaults it is switched off and the audio is bit-for-bit what stock v1.4.1 sends.
 
@@ -6,7 +6,7 @@ Why: with an AIOC rev 1.0 into a UV-K5 (DIG path) the over-the-air response is +
 
 ## Registers
 
-All are ordinary AIOC settings registers, read and written through the HID feature report like the others. Writes go to RAM and are lost at power-off unless the host sets the store bit, which the bench tools never do.
+All are ordinary AIOC settings registers, read and written through the HID feature report like the others. Writes go to RAM and are lost at power-off unless the host sets the store bit (`tools/aioc_eq.py` does that only when you add `--store`).
 
 | Address | Name | Default | Contents |
 |---|---|---|---|
@@ -40,7 +40,7 @@ The filters are direct form I in fixed point: 64-bit accumulate (single-cycle SM
 
 ## Designing and applying a set
 
-`bench/eq.py` (needs numpy) fits three sections to the measured response, scales the result so the equaliser never has gain above -0.1 dB at any frequency (it only cuts, so a full-scale input cannot clip), quantises, prints the predicted response and the exact `aioc_reg.py write` commands.
+`bench/eq.py` (needs numpy) fits three sections to the measured response, scales the result so the equaliser never has gain above -0.1 dB at any frequency (it only cuts, so a full-scale input cannot clip), quantises, prints the predicted response, the register values and a `tools/aioc_eq.py apply custom` command that loads them.
 
 ```
 python3 bench/eq.py                              # fit to the built-in measured K5 response
@@ -52,11 +52,11 @@ python3 bench/eq.py --bypass                     # the one write that switches i
 
 Because it only cuts, the level in the passband drops (about 5.7 dB for the proposed set). Make that up with the K5's deviation register or by driving the AIOC harder from the host.
 
-Check it took: `aioc_reg.py read 0xC8` while audio is playing should show the GEN you wrote in bits 8-15, bit 2 set, and a saturation count of 0.
+Check it took: `tools/aioc_eq.py status` while audio is playing should say it is running with the GEN you wrote and no clipping. In register terms, 0xC8 shows the GEN in bits 8-15, bit 2 set, and a saturation count of 0.
 
-## Proposed first set
+## The k5-red profile
 
-From `eq.py` with no options, for the chain measured on 2026-09-28 (packet firmware, deviation 0x862, -12 dBFS):
+This is what `tools/aioc_eq.py apply k5-red` loads and what the `-k5-red` release image has as its default. It came from `eq.py` with no options, for a red rev 1.0 AIOC into a UV-K5 running the packet firmware, measured over the air on 2026-09-28 (deviation 0x862, -12 dBFS):
 
 | Section | Type | Frequency | Gain | Q |
 |---|---|---|---|---|
@@ -89,58 +89,43 @@ then scaled by -6.55 dB overall. Gain at 1 kHz is -5.74 dB.
 
 Spread from 300 Hz to 3.2 kHz goes from 3.2 dB to 0.24 dB. Above 6 kHz the lift falls away again (+4.5 dB at 8 kHz, +1 dB at 12 kHz, back to about 0 at 16 kHz, all relative to 1 kHz). The third section mostly chases the 1 kHz reference point; `--sections 2` gives about 0.3 dB of spread with one section fewer.
 
-The writes, RAM only:
+Measured over the air with this set loaded, the response was within -0.64 dB and +0.42 dB of 1 kHz from 20 Hz to 6 kHz.
+
+The register values, and what 0xC8 reads while it runs at 48 kHz:
 
 ```
-T=/home/tf/src/uvk5-packet-bench/tools/aioc_reg.py
-python3 $T write 0xB0 0x1FC74BD8
-python3 $T write 0xB1 0xC0E42580
-python3 $T write 0xB2 0x1F551D69
-python3 $T write 0xB3 0xC0E42580
-python3 $T write 0xB4 0x1F1C6941
-python3 $T write 0xB5 0x12B8B2CD
-python3 $T write 0xB6 0xF090A649
-python3 $T write 0xB7 0x04B022DF
-python3 $T write 0xB8 0xDF2C6FBF
-python3 $T write 0xB9 0x11C94E12
-python3 $T write 0xBA 0x2029FDF6
-python3 $T write 0xBB 0xC3FC2B77
-python3 $T write 0xBC 0x1C737807
-python3 $T write 0xBD 0xC3FC2B77
-python3 $T write 0xBE 0x1C9D75FC
-python3 $T write 0xBF 0xBB801303
-python3 $T read 0xC8        # expect 0x00001307 while playing at 48 kHz
+0xB0 0x1FC74BD8   0xB5 0x12B8B2CD   0xBA 0x2029FDF6
+0xB1 0xC0E42580   0xB6 0xF090A649   0xBB 0xC3FC2B77
+0xB2 0x1F551D69   0xB7 0x04B022DF   0xBC 0x1C737807
+0xB3 0xC0E42580   0xB8 0xDF2C6FBF   0xBD 0xC3FC2B77
+0xB4 0x1F1C6941   0xB9 0x11C94E12   0xBE 0x1C9D75FC
+0xBF 0xBB801303   (FS 48000, GEN 0x13, 3 sections)
+0xC8 0x00001307   (read only, while playing)
 ```
+
+## Loading a set from your own software
+
+Everything goes through the AIOC's HID interface (USB 1209:7388 unless you changed it, interface 3), with the same feature report every AIOC setting uses. The report is 6 bytes, `[control, address, d0, d1, d2, d3]`, value little-endian; the device has no report IDs, so hidapi and most HID libraries want an extra 0 byte in front.
+
+- **Write** a register (RAM only): control 0x01.
+- **Read** a register: send control 0x00 with the address, then get the feature report; it comes back as `[0x00, address, d0, d1, d2, d3]`.
+- **Store** everything to flash: control 0x80. Leave this to the user: it writes the whole settings page as it stands in RAM, other settings included.
+
+To load a set: write 0xB0 to 0xBE first, then 0xBF. The control word commits the coefficients, and only when its value changes, so if 0xBF already holds the value you want but the coefficients differ, write 0 to 0xBF first. To switch off, write 0 to 0xBF. Read 0xB0 to 0xBF back to check, and read 0xC8 during playback to see it running. Leave every other register alone.
 
 ## Reverting
 
-- Switch it off: `aioc_reg.py write 0xBF 0` (a 10 ms fade, then bit-exact stock audio).
-- Or power-cycle the AIOC: the registers are RAM only.
-- Or flash stock v1.4.1 back (below).
+- Switch it off: `tools/aioc_eq.py off` (a 10 ms fade, then bit-exact stock audio). Add `--store` if you had stored it on.
+- Or power-cycle the AIOC, if you never stored it.
+- Or flash stock AIOC firmware back (see the README).
 
 ## Tests
 
 `make -C bench test` compiles the firmware's own `tx_eq.c` with the host gcc (with the undefined-behaviour and address sanitizers) and checks: bypass is bit-exact (defaults, NSECT 0, wrong sample rate, and after switching off); the fixed-point output matches a double-precision reference to within the 16-bit rounding (gain within 0.01 dB, error under 0.36 LSB rms, 20 Hz to 12 kHz); saturation clamps with no wraparound, at the output and inside; extreme coefficients cannot overflow; silence decays to exact zero with no limit cycle; a set written word by word during playback never leaks before its commit, and switching sets, switching on and switching off cause no step or overshoot beyond the steady signals.
 
-## Flashing (DFU)
+## Flashing
 
-The AIOC's runtime DFU interface (interface 6) detaches into the STM32's ROM bootloader, which enumerates as `0483:df11`. Flash starts at 0x08000000, alt setting 0 is the internal flash, and the part has 128 KB.
+See the README for flashing, backing up and recovery. Two details for people building their own images:
 
-Note that the full `.bin` is 128000 bytes and ends with the settings page at 0x0801F000 filled with 0xFF. Upstream does this on purpose: flashing it wipes the stored settings, and the AIOC boots with firmware defaults. On the bench unit that changes 0x24 from its stored 0x00000004 back to the default 0x00000404, which adds serial DTR-and-not-RTS as a PTT source. An image without the settings page leaves the stored settings as they are (the new registers read as zero, so off): `arm-none-eabi-objcopy -O binary -R .eeprom aioc-fw.elf aioc-fw-keep-settings.bin`. DFU only erases the pages it writes.
-
-```
-# 1. Back up the whole flash, stored settings included (leaves the AIOC in the bootloader)
-dfu-util -d 1209:7388,0483:df11 -a 0 -s 0x08000000:131072 -U aioc-backup.bin
-
-# 2. Flash (the device is already in the bootloader after step 1)
-dfu-util -d 0483:df11 -a 0 -s 0x08000000:leave -D aioc-fw.bin
-#    or straight from normal running, as in the upstream README:
-dfu-util -d 1209:7388,0483:df11 -a 0 -s 0x08000000:leave -D aioc-fw.bin
-
-# 3. Recovery if it does not come back: short the two outermost pins of the programming
-#    header (BOOT0, see doc/images/k1-aioc-dfu.jpg), plug in, then
-dfu-util -d 0483:df11 -a 0 -s 0x08000000:leave -D aioc-backup.bin
-#    remove the short and replug
-```
-
-Upload in step 1 works unless the chip's readout protection is on; if it fails with an error, skip it: stock v1.4.1 built from source is the fallback image.
+- The full `.bin` is 128000 bytes and ends with the settings page at 0x0801F000 filled with 0xFF. Upstream does this on purpose: flashing it wipes the stored settings, and the AIOC boots with firmware defaults. That includes the PTT mapping, register 0x24, whose default adds serial DTR-and-not-RTS as a PTT source.
+- An image without the settings page leaves the stored settings as they are (a page stored by v1.4.1 reads as zero at 0xB0 to 0xBF, so the equaliser is off): `arm-none-eabi-objcopy -O binary -R .eeprom aioc-fw.elf aioc-fw-keep-settings.bin`, which `make` also produces. DFU only erases the pages it writes.

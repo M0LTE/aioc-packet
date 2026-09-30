@@ -15,7 +15,8 @@ with the K5's deviation setting.
 
 Firmware format (see EQ.md): section k at 0xB0 + 5k holds b0, b1, b2, a1, a2, signed 32 bit
 Q3.29; 0xBF is the control word (NSECT bits 0-1, GEN bits 8-15, FS bits 16-31). The printed
-aioc_reg.py writes are RAM only: they are lost at power-off, and aioc_reg.py never stores.
+tools/aioc_eq.py command loads the set into RAM only: it is lost at power-off unless you
+add --store.
 
 Needs only numpy.
 """
@@ -30,11 +31,12 @@ COEF0_ADDR = 0xB0
 CTRL_ADDR = 0xBF
 INFO_ADDR = 0xC8
 MAX_SECTIONS = 3
+COEF_COUNT = 15
 SIG_HEADROOM_DB = 20 * math.log10(4)   # internal clamp is 4x full scale
-AIOC_REG = "/home/tf/src/uvk5-packet-bench/tools/aioc_reg.py"
+AIOC_EQ = "tools/aioc_eq.py"
 
 # Over-the-air TX response, AIOC rev 1.0 into the K5 mic input, packet firmware DIG path,
-# 0x862 deviation, -12 dBFS, relative to 1 kHz (uvk5-packet-bench docs/results.md, 2026-09-28).
+# 0x862 deviation, -12 dBFS, relative to 1 kHz (measured 2026-09-28).
 MEASURED = [
     (20, 3.0), (31.5, 5.5), (50, 6.7), (63, 6.8), (100, 5.9), (160, 4.3), (250, 2.7),
     (315, 2.1), (500, 1.2), (800, 0.6), (1000, 0.0), (1600, 0.1), (2000, 0.1), (2500, -0.5),
@@ -267,14 +269,13 @@ def main(argv):
     ap.add_argument("--sections", type=int, default=3, choices=(1, 2, 3), help="sections to fit (default 3)")
     ap.add_argument("--measured", help="CSV of hz,db re 1 kHz to fit and predict against")
     ap.add_argument("--ceiling-db", type=float, default=-0.1, help="highest EQ gain at any frequency (default -0.1)")
-    ap.add_argument("--gen", type=int, help="GEN tag 0-255 (default: derived from the coefficients); "
-                                           "must differ from the value in 0xBF now, or nothing is latched")
+    ap.add_argument("--gen", type=int, help="GEN tag 0-255 (default: derived from the coefficients)")
     ap.add_argument("--bypass", action="store_true", help="print the write that turns the EQ off")
     args = ap.parse_args(argv)
 
     if args.bypass:
         print("# Turn the TX equaliser off (bypass, identical to stock v1.4.1):")
-        print(f"python3 {AIOC_REG} write 0x{CTRL_ADDR:02X} 0x00000000")
+        print(f"python3 {AIOC_EQ} off")
         return
 
     fs = args.fs
@@ -339,18 +340,18 @@ def main(argv):
     for i, w in enumerate(words):
         print("#   " + str(i) + ": " + " ".join(f"{n:+11d}" for n in w))
     print("#")
-    print("# Register writes, RAM only. Coefficients first, the control word last (it commits them):")
-    addr = COEF0_ADDR
-    for w in words:
-        for n in w:
-            print(f"python3 {AIOC_REG} write 0x{addr:02X} 0x{n & 0xFFFFFFFF:08X}")
-            addr += 1
-    print(f"python3 {AIOC_REG} write 0x{CTRL_ADDR:02X} 0x{ctrl:08X}")
-    print("# Check: 0xC8 should read 0x....%02X0%X (GEN %d, NSECT %d, bit 2 set while playing at %s)"
-          % (gen, 4 | nsect, gen, nsect, f"{fs} Hz" if not args.any_rate else "any rate"))
-    print(f"python3 {AIOC_REG} read 0x{INFO_ADDR:02X}")
-    print("# If 0xBF already held this exact value, nothing was latched: rerun with another --gen.")
-    print(f"# Revert: python3 {AIOC_REG} write 0x{CTRL_ADDR:02X} 0x00000000")
+    print("# Register values, coefficients first, the control word last (writing it commits them):")
+    flat = [n & 0xFFFFFFFF for w in words for n in w]
+    flat += [0] * (COEF_COUNT - len(flat))
+    for i, n in enumerate(flat):
+        print(f"#   0x{COEF0_ADDR + i:02X} = 0x{n:08X}")
+    print(f"#   0x{CTRL_ADDR:02X} = 0x{ctrl:08X}")
+    print("# Load them (RAM only; add --store to keep them over power-off):")
+    print(f"python3 {AIOC_EQ} apply custom " + " ".join(f"0x{n:08X}" for n in flat) + f" 0x{ctrl:08X}")
+    print("# Check: 'status' while playing should show 0xC8 running with GEN %d, NSECT %d (at %s)"
+          % (gen, nsect, f"{fs} Hz" if not args.any_rate else "any rate"))
+    print(f"python3 {AIOC_EQ} status")
+    print(f"# Revert: python3 {AIOC_EQ} off")
 
 
 if __name__ == "__main__":
