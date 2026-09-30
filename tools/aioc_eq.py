@@ -245,6 +245,13 @@ def status(aioc):
     print(f"  control:   0x{words[N_COEF]:08X}")
     running = bool(info & 0x4)
     gen = info >> 8 & 0xFF
+    try:
+        playing = (aioc.read(0xD0) >> 28 & 0xF) == 2   # INFO_AUDIO0 play state: 2 = running
+    except Exception:
+        playing = True                                 # unknown: say nothing extra
+    if not playing and (running or not (words[N_COEF] & 0x3)):
+        print("Not playing audio now: the running state below is as of the last playback,")
+        print("and a change takes effect when playback next starts.")
     if running:
         clips = info >> 16
         print(f"Running now: yes, GEN 0x{gen:02X}, {info & 0x3} sections"
