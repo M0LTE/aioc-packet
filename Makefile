@@ -4,17 +4,18 @@
 # (.project, .cproject). The settings below (MCU, defines, include paths, -O3)
 # are the Release configuration of that project, copied by hand.
 #
-#   make                      build/aioc-fw.{elf,bin,hex} and build/aioc-fw-keep-settings.bin
-#   make TXEQ_DEFAULT=k5-red  same, but the TX equaliser defaults to the "K5 on red
-#                             v1 AIOC" profile instead of off (use BUILD=... for a
-#                             separate output directory)
-#   make test                 host unit tests for the equaliser (bench/)
+#   make                      build/aioc-fw.{elf,bin,hex} and build/aioc-fw-keep-settings.bin,
+#                             with the TX equaliser defaulting to the "K5 on red v1 AIOC"
+#                             profile (k5-red)
+#   make TXEQ_DEFAULT=off     same, but the equaliser defaults to off, for development
+#                             (use BUILD=... for a separate output directory)
+#   make test                 host unit tests for the equaliser and the settings page (bench/)
 #
 # The CI (.github/workflows) pins the toolchain version; see README.md.
 
 AIOC_SRC ?= stm32/aioc-fw
 BUILD    ?= build
-TXEQ_DEFAULT ?= off
+TXEQ_DEFAULT ?= k5-red
 
 CROSS   ?= arm-none-eabi-
 CC      := $(CROSS)gcc
@@ -25,10 +26,10 @@ MCU_FLAGS := -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 
 DEFINES := -DSTM32F302xC -DUSER_VECT_TAB_ADDRESS -DCFG_TUSB_MCU=OPT_MCU_STM32F3
 
-ifeq ($(TXEQ_DEFAULT),k5-red)
-DEFINES += -DTXEQ_DEFAULT_K5_RED_V1
-else ifneq ($(TXEQ_DEFAULT),off)
-$(error TXEQ_DEFAULT must be off or k5-red)
+ifeq ($(TXEQ_DEFAULT),off)
+DEFINES += -DTXEQ_DEFAULT_OFF
+else ifneq ($(TXEQ_DEFAULT),k5-red)
+$(error TXEQ_DEFAULT must be k5-red or off)
 endif
 
 INCLUDES := \

@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "settings_page.h"
 #include <assert.h>
 #include "stm32f3xx_hal.h"
 
@@ -82,17 +83,12 @@ void Settings_Recall(void)
     /* From linker script */
     extern uint32_t * _eeprom;
 
-    uint32_t wordAddress = (uint32_t) &_eeprom;
-    uint32_t wordCount = SETTINGS_REGMAP_SIZE;
-    uint32_t * wordPtr = settingsRegMap;
+    const volatile uint32_t * page = (const volatile uint32_t *) &_eeprom;
 
-    uint32_t magic = (*(__IO uint32_t *) wordAddress);
-
-    if ( magic == SETTINGS_REG_MAGIC_DEFAULT ) {
-        while (wordCount--) {
-            *wordPtr++ = *(__IO uint32_t *) wordAddress;
-            wordAddress += sizeof(uint32_t);
-        }
+    if ( page[SETTINGS_REG_MAGIC] == SETTINGS_REG_MAGIC_DEFAULT ) {
+        /* The whole page, except that the TX equaliser registers of a page stored by firmware
+         * without the equaliser (stock v1.4.x) get their defaults (settings_page.c) */
+        SettingsPage_Load(settingsRegMap, page);
     } else {
         /* Magic token not found, assume flash is unprogrammed */
         Settings_Default();
@@ -141,30 +137,20 @@ void Settings_Default(void)
     settingsRegMap[SETTINGS_REG_FOXHUNT_MSG2] = SETTINGS_REG_FOXHUNT_MSG2_DEFAULT;
     settingsRegMap[SETTINGS_REG_FOXHUNT_MSG3] = SETTINGS_REG_FOXHUNT_MSG3_DEFAULT;
 
-    /* TX equaliser registers */
-#ifndef TXEQ_DEFAULT_K5_RED_V1
-    settingsRegMap[SETTINGS_REG_TXEQ_CTRL] = SETTINGS_REG_TXEQ_CTRL_DEFAULT;
-    for (uint32_t i = 0; i < SETTINGS_REG_TXEQ_COEF_COUNT; i++) {
-        settingsRegMap[SETTINGS_REG_TXEQ_COEF0 + i] = SETTINGS_REG_TXEQ_COEF_DEFAULT;
-    }
-#else
+    /* TX equaliser registers. Coefficients first, then the control word that commits them,
+     * with interrupts held off so that a "load defaults" during playback can never latch a
+     * half-written set. */
     {
-        /* Coefficients first, then the control word that commits them, with interrupts held
-         * off so that a "load defaults" during playback can never latch a half-written set. */
-        static const uint32_t coefDefaults[SETTINGS_REG_TXEQ_COEF_COUNT] = SETTINGS_REG_TXEQ_COEF_DEFAULTS;
         uint32_t primask = __get_PRIMASK();
         __disable_irq();
-        for (uint32_t i = 0; i < SETTINGS_REG_TXEQ_COEF_COUNT; i++) {
-            settingsRegMap[SETTINGS_REG_TXEQ_COEF0 + i] = coefDefaults[i];
-        }
-        settingsRegMap[SETTINGS_REG_TXEQ_CTRL] = SETTINGS_REG_TXEQ_CTRL_DEFAULT;
+        SettingsPage_EqDefaults(settingsRegMap);
         __set_PRIMASK(primask);
     }
-#endif
 
     /* AIOC Debug registers */
     settingsRegMap[SETTINGS_REG_INFO_AIOC0] = SETTINGS_REG_INFO_AIOC0_DEFAULT;
     settingsRegMap[SETTINGS_REG_INFO_TXEQ] = SETTINGS_REG_INFO_TXEQ_DEFAULT;
+    settingsRegMap[SETTINGS_REG_INFO_TXEQPAGE] = SETTINGS_REG_INFO_TXEQPAGE_DEFAULT;
 
     /* Audio Debug registers */
     settingsRegMap[SETTINGS_REG_INFO_AUDIO0] = SETTINGS_REG_INFO_AUDIO0_DEFAULT;

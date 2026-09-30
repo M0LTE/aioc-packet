@@ -9,8 +9,9 @@
     aioc_eq.py off                  switch the equaliser off (bit-exact stock audio)
     aioc_eq.py profiles             list the built-in profiles
 
-Changes go to the AIOC's RAM only and are gone at the next power-up, unless you add
---store to apply or off. Storing writes the AIOC's whole settings page to flash as it
+Changes go to the AIOC's RAM only. At the next power-up the AIOC loads its stored settings
+again, or its defaults if nothing is stored (aioc-packet's default is k5-red, on), unless
+you add --store to apply or off. Storing writes the AIOC's whole settings page to flash as it
 stands in RAM, so any other setting changed since power-up (by this or any other tool)
 is stored too. The tool lists those first and asks before it stores.
 
@@ -53,8 +54,9 @@ PROFILES = {
     },
 }
 
-# Firmware defaults (settings.h, unchanged from v1.4.1). Every writable register not
-# listed here defaults to 0. Used only to point out what else a store would persist.
+# Firmware defaults outside the equaliser block (settings.h, unchanged from v1.4.1). Every
+# other writable register outside that block defaults to 0. Used only to point out what else
+# a store would persist.
 DEFAULTS = {
     0x00: MAGIC, 0x08: 0x73881209, 0x24: 0x00000404, 0x25: 0x00000008,
     0x44: 0x00020000, 0x45: 0x01000000, 0x60: 0x00010100, 0x64: 0x01000000,
@@ -330,14 +332,15 @@ def main(argv):
             if a.store:
                 store(aioc, a.yes)
             else:
-                print("Not stored: it will be off again after the next power-up. Add --store to keep it.")
+                print("Not stored: at the next power-up the AIOC goes back to its stored setting (or its "
+                      "default, k5-red). Add --store to keep this.")
         elif a.command == "off":
             changed = switch_off(aioc)
             print("Equaliser: " + ("switched off" if changed else "was already off") + " (RAM).")
             if a.store:
                 store(aioc, a.yes)
             else:
-                print("Not stored: if the equaliser was stored on, it comes back at the next power-up. "
+                print("Not stored: the equaliser comes back on at the next power-up unless it was stored off. "
                       "Add --store to keep it off.")
     finally:
         aioc.close()

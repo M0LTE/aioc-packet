@@ -304,7 +304,6 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
  * Writing these has no effect until SETTINGS_REG_TXEQ_CTRL changes value. */
 #define SETTINGS_REG_TXEQ_COEF0                             0xB0
 #define SETTINGS_REG_TXEQ_COEF_COUNT                        15
-#define SETTINGS_REG_TXEQ_COEF_DEFAULT                      0
 
 /* TX equaliser control register. All zero = bypass, identical to v1.4.1.
  * The coefficients are copied, all together between two DAC samples, whenever this register
@@ -312,18 +311,25 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
  * then settles unheard for 4096 samples and crossfades in over 512 (enable and disable too).
  * It sits above the coefficients so that a flash recall (which copies upwards) sets it last. */
 #define SETTINGS_REG_TXEQ_CTRL                              0xBF
-#ifndef TXEQ_DEFAULT_K5_RED_V1
-#define SETTINGS_REG_TXEQ_CTRL_DEFAULT                      0
-#else
-/* Build option (make TXEQ_DEFAULT=k5-red): the defaults are the measured "K5 on red v1 AIOC"
- * profile instead of off, the same values tools/aioc_eq.py writes for "apply k5-red".
- * NSECT 3, GEN 0x13, FS 48000. Defaults are used when the settings page holds nothing
- * stored (after flashing a full image) and on a "load defaults" request. */
+#ifndef TXEQ_DEFAULT_OFF
+/* Default: the measured "K5 on red v1 AIOC" profile, the same values tools/aioc_eq.py writes
+ * for "apply k5-red". NSECT 3, GEN 0x13, FS 48000. Defaults are used when the settings page
+ * holds nothing stored (after flashing a full image), for the EQ registers of a page stored
+ * by firmware without the equaliser (see SETTINGS_REG_INFO_TXEQPAGE), and on a "load
+ * defaults" request. */
 #define SETTINGS_REG_TXEQ_CTRL_DEFAULT                      0xBB801303UL
 #define SETTINGS_REG_TXEQ_COEF_DEFAULTS { \
     0x1FC74BD8UL, 0xC0E42580UL, 0x1F551D69UL, 0xC0E42580UL, 0x1F1C6941UL, \
     0x12B8B2CDUL, 0xF090A649UL, 0x04B022DFUL, 0xDF2C6FBFUL, 0x11C94E12UL, \
     0x2029FDF6UL, 0xC3FC2B77UL, 0x1C737807UL, 0xC3FC2B77UL, 0x1C9D75FCUL }
+#else
+/* Developer build option (make TXEQ_DEFAULT=off): the equaliser defaults to off, so with
+ * nothing stored the audio is bit-for-bit v1.4.1 */
+#define SETTINGS_REG_TXEQ_CTRL_DEFAULT                      0
+#define SETTINGS_REG_TXEQ_COEF_DEFAULTS { \
+    0, 0, 0, 0, 0, \
+    0, 0, 0, 0, 0, \
+    0, 0, 0, 0, 0 }
 #endif
 /* NSECT: Number of biquad sections in use (0 = bypass, 1..3) */
 #define SETTINGS_REG_TXEQ_CTRL_NSECT_OFFS                   0
@@ -357,6 +363,18 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
 #define SETTINGS_REG_INFO_TXEQ_GEN_MASK                     0x0000FF00UL
 #define SETTINGS_REG_INFO_TXEQ_CLIPS_OFFS                   16
 #define SETTINGS_REG_INFO_TXEQ_CLIPS_MASK                   0xFFFF0000UL
+
+/* TX equaliser settings page marker (read only). Always "TXEQ" in RAM on this firmware, so
+ * every settings page it stores carries it. Firmware without the equaliser (stock v1.4.x)
+ * leaves this address zero. On recall, the EQ registers come from the stored page if the
+ * page carries the marker or a nonzero TXEQ_CTRL (a page stored by an earlier aioc-packet
+ * with the EQ on); otherwise the page predates the equaliser and they get their defaults */
+#define SETTINGS_REG_INFO_TXEQPAGE                          0xC9
+#define SETTINGS_REG_INFO_TXEQPAGE_DEFAULT                  SETTINGS_REG_INFO_TXEQPAGE_MARKER
+#define SETTINGS_REG_INFO_TXEQPAGE_MARKER                   ( (((uint32_t) 'T') <<  0) | \
+                                                              (((uint32_t) 'X') <<  8) | \
+                                                              (((uint32_t) 'E') << 16) | \
+                                                              (((uint32_t) 'Q') << 24) )
 
 /* UAC audio debug register 0 */
 #define SETTINGS_REG_INFO_AUDIO0                            0xD0
