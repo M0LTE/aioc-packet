@@ -97,13 +97,16 @@ Leave out `--store` to try a change until the next power-up. With `--store` the 
 
 Good to know: the equaliser runs only while the host plays audio at 48000 Hz, and it lowers the level by 5.7 dB at 1 kHz, which the quansheng-packet firmware's default deviation already allows for.
 
-On Linux the tool, like direwolf's CM108 PTT, needs access to the AIOC's hidraw device. Use `sudo`, or add this as `/etc/udev/rules.d/99-aioc.rules` (it covers dfu-util too) and replug:
+On Linux the tool, like direwolf's CM108 PTT, needs access to the AIOC's hidraw device. Use `sudo`, or add this as `/etc/udev/rules.d/70-aioc.rules` (it covers dfu-util and the serial port too), reload, and replug. The name must start with a number below 73: `uaccess` rules that run later (a `99-` name) silently grant nothing.
 
 ```
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="7388", TAG+="uaccess"
 SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="7388", TAG+="uaccess"
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="df11", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="7388", TAG+="uaccess"
 ```
+
+Then `sudo udevadm control --reload-rules && sudo udevadm trigger`.
 
 Writing your own software? The registers and how to load a profile are in [bench/EQ.md](bench/EQ.md).
 
