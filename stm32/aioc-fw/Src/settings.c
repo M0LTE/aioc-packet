@@ -142,10 +142,25 @@ void Settings_Default(void)
     settingsRegMap[SETTINGS_REG_FOXHUNT_MSG3] = SETTINGS_REG_FOXHUNT_MSG3_DEFAULT;
 
     /* TX equaliser registers */
+#ifndef TXEQ_DEFAULT_K5_RED_V1
     settingsRegMap[SETTINGS_REG_TXEQ_CTRL] = SETTINGS_REG_TXEQ_CTRL_DEFAULT;
     for (uint32_t i = 0; i < SETTINGS_REG_TXEQ_COEF_COUNT; i++) {
         settingsRegMap[SETTINGS_REG_TXEQ_COEF0 + i] = SETTINGS_REG_TXEQ_COEF_DEFAULT;
     }
+#else
+    {
+        /* Coefficients first, then the control word that commits them, with interrupts held
+         * off so that a "load defaults" during playback can never latch a half-written set. */
+        static const uint32_t coefDefaults[SETTINGS_REG_TXEQ_COEF_COUNT] = SETTINGS_REG_TXEQ_COEF_DEFAULTS;
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        for (uint32_t i = 0; i < SETTINGS_REG_TXEQ_COEF_COUNT; i++) {
+            settingsRegMap[SETTINGS_REG_TXEQ_COEF0 + i] = coefDefaults[i];
+        }
+        settingsRegMap[SETTINGS_REG_TXEQ_CTRL] = SETTINGS_REG_TXEQ_CTRL_DEFAULT;
+        __set_PRIMASK(primask);
+    }
+#endif
 
     /* AIOC Debug registers */
     settingsRegMap[SETTINGS_REG_INFO_AIOC0] = SETTINGS_REG_INFO_AIOC0_DEFAULT;

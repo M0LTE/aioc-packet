@@ -312,7 +312,19 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
  * then settles unheard for 4096 samples and crossfades in over 512 (enable and disable too).
  * It sits above the coefficients so that a flash recall (which copies upwards) sets it last. */
 #define SETTINGS_REG_TXEQ_CTRL                              0xBF
+#ifndef TXEQ_DEFAULT_K5_RED_V1
 #define SETTINGS_REG_TXEQ_CTRL_DEFAULT                      0
+#else
+/* Build option (make TXEQ_DEFAULT=k5-red): the defaults are the measured "K5 on red v1 AIOC"
+ * profile instead of off, the same values tools/aioc_eq.py writes for "apply k5-red".
+ * NSECT 3, GEN 0x13, FS 48000. Defaults are used when the settings page holds nothing
+ * stored (after flashing a full image) and on a "load defaults" request. */
+#define SETTINGS_REG_TXEQ_CTRL_DEFAULT                      0xBB801303UL
+#define SETTINGS_REG_TXEQ_COEF_DEFAULTS { \
+    0x1FC74BD8UL, 0xC0E42580UL, 0x1F551D69UL, 0xC0E42580UL, 0x1F1C6941UL, \
+    0x12B8B2CDUL, 0xF090A649UL, 0x04B022DFUL, 0xDF2C6FBFUL, 0x11C94E12UL, \
+    0x2029FDF6UL, 0xC3FC2B77UL, 0x1C737807UL, 0xC3FC2B77UL, 0x1C9D75FCUL }
+#endif
 /* NSECT: Number of biquad sections in use (0 = bypass, 1..3) */
 #define SETTINGS_REG_TXEQ_CTRL_NSECT_OFFS                   0
 #define SETTINGS_REG_TXEQ_CTRL_NSECT_MASK                   0x00000003UL
