@@ -6,6 +6,8 @@ It is upstream AIOC v1.4.1 with one addition: a transmit equaliser, switched on 
 
 ## Packet on a UV-K5 in two steps
 
+**Easiest:** the [setup site](https://m0lte.github.io/quansheng-packet/) walks you through both steps in Chrome or Edge, with nothing to install and no pins to short: it flashes the radio, backs up and flashes the AIOC, sets up the radio, and helps you set up your TNC.
+
 1. **The radio:** flash [quansheng-packet](https://github.com/M0LTE/quansheng-packet) on your UV-K5. Its README has the steps and the packet setup advice.
 2. **The AIOC:** flash `aioc-packet-X.Y.Z.bin` from this repo's [releases page](https://github.com/M0LTE/aioc-packet/releases), as below.
 
@@ -29,6 +31,10 @@ The equaliser profile, `k5-red`, was measured on a red AIOC (printed rev 1.0, v1
 ## Flashing
 
 ### The easy way: in your browser
+
+Use the [setup site](https://m0lte.github.io/quansheng-packet/) (step 2). It switches the AIOC into its bootloader for you, offers a backup first, and flashes the right file.
+
+### Another browser option: the G1LRO AIOC toolkit
 
 The [AIOC toolkit](https://g1lro.github.io/aioc-toolkit/) flashes from Chrome or Edge, with nothing to install.
 
