@@ -1,0 +1,122 @@
+# Builds the firmware on every push to main and every pull request. On a tag v*, the
+# same run then publishes a GitHub release with the images it built.
+#
+# The toolchain is pinned: an Ubuntu 26.04 container with exact package versions of
+# arm-none-eabi-gcc, binutils and newlib. These are the versions the first release was
+# tested with on hardware. Change them deliberately, and flash-test before releasing.
+
+name: firmware
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GCC_VERSION: 15:14.2.rel1-1
+  BINUTILS_VERSION: 2.45.50.20251209-1ubuntu1+23build1
+  NEWLIB_VERSION: 4.6.0.20260123-1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install the pinned toolchain
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git make \
+            python3 python3-numpy gcc libc6-dev \
+            "gcc-arm-none-eabi=$GCC_VERSION" \
+            "binutils-arm-none-eabi=$BINUTILS_VERSION" \
+            "libnewlib-arm-none-eabi=$NEWLIB_VERSION"
+          arm-none-eabi-gcc --version | head -n 1
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Name this build
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Test
+        run: |
+          make test
+          python3 tools/test_aioc_eq.py
+
+      - name: Build
+        run: |
+          make -j"$(nproc)" BUILD=build/plain
+          make -j"$(nproc)" BUILD=build/k5-red TXEQ_DEFAULT=k5-red
+
+      - name: Package
+        run: |
+          mkdir dist
+          cp build/plain/aioc-fw.bin                "dist/aioc-packet-$VERSION.bin"
+          cp build/plain/aioc-fw-keep-settings.bin  "dist/aioc-packet-$VERSION-keep-settings.bin"
+          cp build/plain/aioc-fw.hex                "dist/aioc-packet-$VERSION.hex"
+          cp build/k5-red/aioc-fw.bin               "dist/aioc-packet-$VERSION-k5-red.bin"
+          (cd dist && sha256sum -- *.bin *.hex > SHA256SUMS && cat SHA256SUMS)
+          {
+            arm-none-eabi-gcc --version | head -n 1
+            dpkg-query -W -f='${Package} ${Version}\n' gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+            echo "container ubuntu:26.04"
+          } > toolchain.txt
+          python3 - <<'EOF'
+          import os
+          v = os.environ["VERSION"]
+          notes = open(".github/release-notes.md").read()
+          extra = f"docs/releases/v{v}.md"
+          if os.path.exists(extra):
+              notes = open(extra).read().rstrip() + "\n\n" + notes
+          notes = (notes.replace("@VERSION@", v)
+                        .replace("@TOOLCHAIN@", open("toolchain.txt").read().rstrip())
+                        .replace("@SHA256SUMS@", open("dist/SHA256SUMS").read().rstrip()))
+          open("release-notes.md", "w").write(notes)
+          EOF
+          mv release-notes.md toolchain.txt dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: aioc-packet-${{ env.VERSION }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          prerelease=""
+          if [[ "$TAG" =~ -(rc|beta|alpha) ]]; then prerelease="--prerelease"; fi
+          gh release create "$TAG" --verify-tag $prerelease \
+            --title "aioc-packet ${TAG#v}" \
+            --notes-file release-notes.md \
+            ./*.bin ./*.hex SHA256SUMS
