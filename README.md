@@ -1,85 +1,97 @@
 # aioc-packet
 
-Firmware for the [AIOC](https://github.com/skuep/AIOC) (the ham radio All-In-One Cable) that adds a transmit equaliser, so a UV-K5 running packet firmware sends a flat audio response over the air.
+Firmware for the [AIOC](https://github.com/skuep/AIOC) (the ham radio All-In-One Cable) that makes it a good packet partner for a Quansheng UV-K5.
 
-It is upstream AIOC v1.4.1 with one addition. With the equaliser off, which is the default, the audio is bit-for-bit what stock v1.4.1 sends, and everything else (sound card, serial port, CM108 PTT, settings) works exactly as upstream.
+It is upstream AIOC v1.4.1 with one addition: a transmit equaliser, switched on out of the box, that flattens the audio response of a red AIOC into a UV-K5. Everything else (sound card, serial port, CM108 PTT, settings) works exactly as upstream.
 
-> **Setting up packet on a UV-K5?** The radio side lives at **[github.com/M0LTE/quansheng-packet](https://github.com/M0LTE/quansheng-packet)**: the radio firmware and the packet setup advice. Start there. This repo is only the AIOC half.
+## Packet on a UV-K5 in two steps
 
-## Who it is for
+1. **The radio:** flash [quansheng-packet](https://github.com/M0LTE/quansheng-packet) on your UV-K5. Its README has the steps and the packet setup advice.
+2. **The AIOC:** flash `aioc-packet-X.Y.Z.bin` from this repo's [releases page](https://github.com/M0LTE/aioc-packet/releases), as below.
 
-You have a red AIOC and a Quansheng UV-K5 running [quansheng-packet](https://github.com/M0LTE/quansheng-packet). Out of the box that pair has a lumpy transmit response: measured over the air, +6.7 dB at 60 Hz, -1.1 dB at 3.15 kHz and -5.5 dB at 6 kHz, relative to 1 kHz. Part of that is the AIOC's output, which rises at low frequencies, and part is the radio. With the `k5-red` equaliser profile it measured within -0.64 dB and +0.42 dB from 20 Hz to 6 kHz.
+That's it. Plug the AIOC into the radio and your computer, point your modem software (direwolf or similar) at the AIOC's sound card at **48000 Hz**, and you are on the air.
+
+Flashing this file gives the AIOC a factory-fresh start: any settings stored on it go back to the defaults. The defaults key the radio from the CM108 PTT (what direwolf and most packet software use) and from the serial port with DTR high and RTS low, which suits most software.
 
 ## Which boards
 
-| Board | Status |
+The equaliser profile, `k5-red`, was measured on a red AIOC (printed rev 1.0, v1 circuitry) with a UV-K5. It is untested on anything else. Rev 1.2 boards in particular have different output circuitry, so the profile is probably wrong there. If you have a different board or radio, or you are not sure, use [stock AIOC firmware](https://github.com/skuep/AIOC/releases) instead, or switch the equaliser off with the tool below.
+
+## The files
+
+| File | What it is |
 |---|---|
-| Red AIOC, printed rev 1.0 (v1 circuitry: no TX boost, no RX gain) | Tested. The `k5-red` profile was measured on this board. |
-| Other AIOC boards | Untested. The firmware is v1.4.1 plus the equaliser, so it should run wherever v1.4.1 runs, but the `k5-red` profile is probably wrong for them. Rev 1.2 in particular has different output circuitry. Leave the equaliser off there. |
-
-## Which file to download
-
-Get these from the [releases page](https://github.com/M0LTE/aioc-packet/releases).
-
-| File | Use it when |
-|---|---|
-| `aioc-packet-X.Y.Z-keep-settings.bin` | **Most people.** Keeps your stored AIOC settings (PTT mapping and so on). The equaliser starts off; switch it on with the tool below. |
-| `aioc-packet-X.Y.Z-k5-red.bin` | Red AIOC with a UV-K5, and you want the profile on without installing anything. **Resets stored settings to the defaults.** |
-| `aioc-packet-X.Y.Z.bin` | Full image, equaliser off. **Resets stored settings to the defaults**, like upstream releases. |
-| `aioc-packet-X.Y.Z.hex` | The full image as Intel HEX, for programmers that want it. Also resets stored settings. |
-
-Check your download against `SHA256SUMS` if you like.
-
-If you use the `-k5-red` image, upgrade with the `-k5-red` image again, or store the profile with the tool: a `keep-settings` upgrade keeps what is stored, and a `-k5-red` image stores nothing by itself.
+| `aioc-packet-X.Y.Z.bin` | **The one to use.** Equaliser on. Resets the AIOC's stored settings to the defaults. |
+| `aioc-packet-X.Y.Z-keep-settings.bin` | For upgrading with dfu-util while keeping your stored settings (PTT mapping and so on). See [Keeping your settings](#keeping-your-settings). |
+| `aioc-packet-X.Y.Z.hex` | The recommended image as Intel HEX, for programmers that want it. |
+| `SHA256SUMS` | Checksums, if you want to check your download. |
 
 ## Flashing
 
-You need [dfu-util](https://dfu-util.sourceforge.net/). The AIOC switches itself into the chip's bootloader when dfu-util asks, so there is nothing to open up or short.
+### The easy way: in your browser
 
-- **Linux**: `sudo apt install dfu-util` (or your distro's equivalent). Run the commands with `sudo`, or add the udev rule further down.
+The [AIOC toolkit](https://g1lro.github.io/aioc-toolkit/) flashes from Chrome or Edge, with nothing to install.
+
+1. Download `aioc-packet-X.Y.Z.bin` from the [releases page](https://github.com/M0LTE/aioc-packet/releases).
+2. Put the AIOC in bootloader mode: unplug it, short the two outermost pins of the programming header ([photo](doc/images/k1-aioc-dfu.jpg)), and plug it in with the short in place. It shows up as "STM32 BOOTLOADER".
+3. Open the toolkit's **Flash Firmware** tab, connect to the bootloader, pick the file you downloaded and flash it.
+4. Unplug the AIOC, remove the short, and plug it back in.
+
+The toolkit warns you to flash only official AIOC images. This firmware is built from the official AIOC v1.4.1 source with one feature added, so you can go ahead.
+
+On Windows, if the page cannot see the bootloader, install the WinUSB driver for "STM32 BOOTLOADER" with [Zadig](https://zadig.akeo.ie/).
+
+### With dfu-util, with a backup first
+
+[dfu-util](https://dfu-util.sourceforge.net/) needs no pin short: its command switches the AIOC into the bootloader by itself. It can also back up what is on the AIOC now, which the browser route cannot.
+
+- **Linux**: `sudo apt install dfu-util`. Run the commands with `sudo`, or add the udev rule further down.
 - **macOS**: `brew install dfu-util`.
-- **Windows**: download dfu-util from its website. It needs the WinUSB driver for the bootloader: install it with [Zadig](https://zadig.akeo.ie/) for the "STM32 BOOTLOADER" device (and for the AIOC's DFU interface if dfu-util cannot find the AIOC). Upstream's notes are [here](https://yeswolf.github.io/dfu).
+- **Windows**: get dfu-util from its website, and install the WinUSB driver for "STM32 BOOTLOADER" with [Zadig](https://zadig.akeo.ie/) (upstream's notes are [here](https://yeswolf.github.io/dfu)).
 
-Flashing has been tested on Linux.
-
-**1. Back up what is on the AIOC now.** This saves the whole flash, firmware and stored settings, so you can always go back exactly:
+**1. Back up** the whole flash, firmware and stored settings, so you can always go back exactly:
 
 ```
 dfu-util -d 1209:7388,0483:df11 -a 0 -s 0x08000000:131072 -U aioc-backup.bin
 ```
 
-It leaves the AIOC in the bootloader, ready for step 2. Keep `aioc-backup.bin` somewhere safe. If this step fails with an error (some boards may have read-out protection on), you can skip it; stock firmware is still available from upstream.
+Keep `aioc-backup.bin` somewhere safe. If this fails (some boards may have read-out protection on), you can skip it; stock firmware is still available from upstream.
 
-**2. Flash the new firmware:**
+**2. Flash:**
 
 ```
-dfu-util -d 1209:7388,0483:df11 -a 0 -s 0x08000000:leave -D aioc-packet-X.Y.Z-keep-settings.bin
+dfu-util -d 1209:7388,0483:df11 -a 0 -s 0x08000000:leave -D aioc-packet-X.Y.Z.bin
 ```
 
 The AIOC restarts into the new firmware on its own. A warning about a missing DFU suffix is normal.
 
-**If it does not come back:** unplug it, short the two outermost pins of the programming header ([photo](doc/images/k1-aioc-dfu.jpg)), plug it in with the short in place, and flash again with `-d 0483:df11` in place of `-d 1209:7388,0483:df11`. Then remove the short and replug. The bootloader lives in the chip's ROM, so you cannot brick it this way.
+**If it does not come back:** put it in bootloader mode with the pin short as in the browser steps, and flash again with `-d 0483:df11`. The bootloader lives in the chip's ROM, so you cannot brick the AIOC this way.
 
-## Switching the equaliser on
+### Keeping your settings
 
-The `-k5-red` image has it on already. Otherwise use `tools/aioc_eq.py` from this repo. It needs Python 3 and [hidapi](https://pypi.org/project/hidapi/):
+If you have changed the AIOC's settings and want to keep them, flash `aioc-packet-X.Y.Z-keep-settings.bin` with dfu-util instead. The equaliser then works like this:
+
+- Settings stored by stock AIOC firmware, or none stored: the equaliser comes on with `k5-red`, as with the main file.
+- Settings stored by aioc-packet: the equaliser stays as you stored it, on or off. The one exception is settings stored by the first release, 1.4.1-packet.1, with the equaliser off: those look like stock, so it comes on.
+
+To keep it off, run `aioc_eq.py off --store` (below) after flashing.
+
+## Switching the equaliser
+
+Use `tools/aioc_eq.py` from this repo. It needs Python 3 and [hidapi](https://pypi.org/project/hidapi/):
 
 ```
-pip install hidapi                      # on Debian/Ubuntu, do this inside a venv
-python3 tools/aioc_eq.py apply k5-red   # on until the next power-up: try it first
-python3 tools/aioc_eq.py status         # what it is set to, and whether it is running
-python3 tools/aioc_eq.py apply k5-red --store   # keep it over power-off
-python3 tools/aioc_eq.py off            # back to stock audio (add --store to keep it off)
+pip install hidapi                               # on Debian/Ubuntu, inside a venv
+python3 tools/aioc_eq.py status                  # what it is set to, and whether it is running
+python3 tools/aioc_eq.py off --store             # off, and stays off over power-off
+python3 tools/aioc_eq.py apply k5-red --store    # back on
 ```
 
-Good to know:
+Leave out `--store` to try a change until the next power-up. With `--store` the AIOC saves its whole settings page as it stands, so the tool shows any other changed settings and asks first. It never changes the PTT mapping or anything else.
 
-- Without `--store`, changes last until the AIOC is unplugged. With `--store`, the AIOC saves its **whole** settings page as it stands, so anything else changed since power-up (by this or any other tool) is saved too. The tool lists those settings and asks before storing.
-- The tool only touches the equaliser. It never changes the PTT mapping or any other setting.
-- The equaliser runs only while the host plays audio at **48000 Hz**. Set your modem to 48 kHz.
-- It lowers the level by 5.7 dB at 1 kHz. The quansheng-packet firmware's default deviation already allows for that.
+Good to know: the equaliser runs only while the host plays audio at 48000 Hz, and it lowers the level by 5.7 dB at 1 kHz, which the quansheng-packet firmware's default deviation already allows for.
 
-On Linux the tool, like direwolf's CM108 PTT, needs access to the AIOC's hidraw device. Either use `sudo`, or add this as `/etc/udev/rules.d/99-aioc.rules` (it covers dfu-util too), then replug:
+On Linux the tool, like direwolf's CM108 PTT, needs access to the AIOC's hidraw device. Use `sudo`, or add this as `/etc/udev/rules.d/99-aioc.rules` (it covers dfu-util too) and replug:
 
 ```
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="7388", TAG+="uaccess"
@@ -87,22 +99,18 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="7388", TAG+="uacce
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="df11", TAG+="uaccess"
 ```
 
-Writing your own software? The registers and the exact steps to load a profile are in [bench/EQ.md](bench/EQ.md), under "The k5-red profile" and "Loading a set from your own software".
+Writing your own software? The registers and how to load a profile are in [bench/EQ.md](bench/EQ.md).
 
-## Packet setup, in short
+## What the equaliser does
 
-The full advice is in [quansheng-packet](https://github.com/M0LTE/quansheng-packet). The main points:
+Out of the box a red AIOC and a UV-K5 have a lumpy transmit response: measured over the air, +6.7 dB at 60 Hz, -1.1 dB at 3.15 kHz and -5.5 dB at 6 kHz, relative to 1 kHz. Part of that is the AIOC's output, which rises at low frequencies, and part is the radio. With `k5-red` on, it measured within -0.64 dB and +0.42 dB from 20 Hz to 6 kHz.
 
-- Drive the AIOC near full scale from your modem software, and set the deviation in the radio rather than turning the audio down.
-- The quansheng-packet firmware's default deviation (0x856) assumes this equaliser with the `k5-red` profile.
-- With a stock AIOC, or with the equaliser off, use deviation 0x762 instead.
+The quansheng-packet firmware's default deviation (0x856) assumes this equaliser is on. With a stock AIOC, or with the equaliser off, use deviation 0x762 instead. The rest of the packet advice is in [quansheng-packet](https://github.com/M0LTE/quansheng-packet).
 
-For reference, the red AIOC's mic-level output measures 26 mV rms at 0 dBFS, and unloaded it rises at low frequencies (+8 dB at 100 Hz, +18 dB at 20 Hz).
-
-## Going back to stock AIOC firmware
+## Going back to stock
 
 - To get back exactly what you had, settings included, flash your backup: `dfu-util -d 1209:7388,0483:df11 -a 0 -s 0x08000000:leave -D aioc-backup.bin`.
-- Or flash an upstream release, such as `aioc-fw-1.4.1.bin` from [skuep/AIOC releases](https://github.com/skuep/AIOC/releases), the same way. That resets stored settings to the defaults. The firmware a board shipped with is not necessarily identical to the upstream release, which is another reason to keep your backup.
+- Or flash an upstream release, such as `aioc-fw-1.4.1.bin` from [skuep/AIOC releases](https://github.com/skuep/AIOC/releases), either way above. That resets stored settings to the defaults. The firmware a board shipped with is not necessarily identical to the upstream release, which is another reason to keep your backup.
 
 ## Building
 
@@ -110,8 +118,7 @@ For reference, the red AIOC's mic-level output measures 26 mV rms at 0 dBFS, and
 git clone --recursive https://github.com/M0LTE/aioc-packet
 cd aioc-packet
 make                        # build/aioc-fw.bin, aioc-fw-keep-settings.bin, aioc-fw.hex
-make TXEQ_DEFAULT=k5-red BUILD=build-k5-red   # the image with the profile on by default
-make test                   # host unit tests for the equaliser
+make test                   # host unit tests
 python3 tools/test_aioc_eq.py
 ```
 

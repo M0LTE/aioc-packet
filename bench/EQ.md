@@ -1,6 +1,6 @@
 # TX equaliser
 
-A tunable equaliser in the AIOC's transmit path (USB audio OUT to the DAC, which drives the radio's mic input). It is up to three biquad filters in a row, run on every DAC sample, set through new settings registers. With the registers at their defaults it is switched off and the audio is bit-for-bit what stock v1.4.1 sends.
+A tunable equaliser in the AIOC's transmit path (USB audio OUT to the DAC, which drives the radio's mic input). It is up to three biquad filters in a row, run on every DAC sample, set through new settings registers. It comes on by default with the `k5-red` profile below. Switched off, the audio is bit-for-bit what stock v1.4.1 sends.
 
 Why: with an AIOC rev 1.0 into a UV-K5 (DIG path) the over-the-air response is +6.8 dB around 60 Hz and -5.5 dB at 6 kHz relative to 1 kHz. The low-end hump is the AIOC's output network, the top-end droop mostly the K5. The equaliser takes that out.
 
@@ -10,11 +10,12 @@ All are ordinary AIOC settings registers, read and written through the HID featu
 
 | Address | Name | Default | Contents |
 |---|---|---|---|
-| 0xB0 to 0xB4 | TXEQ section 0 | 0 | b0, b1, b2, a1, a2 |
-| 0xB5 to 0xB9 | TXEQ section 1 | 0 | b0, b1, b2, a1, a2 |
-| 0xBA to 0xBE | TXEQ section 2 | 0 | b0, b1, b2, a1, a2 |
-| 0xBF | TXEQ_CTRL | 0 | bits 0-1 NSECT, bits 8-15 GEN, bits 16-31 FS |
+| 0xB0 to 0xB4 | TXEQ section 0 | k5-red | b0, b1, b2, a1, a2 |
+| 0xB5 to 0xB9 | TXEQ section 1 | k5-red | b0, b1, b2, a1, a2 |
+| 0xBA to 0xBE | TXEQ section 2 | k5-red | b0, b1, b2, a1, a2 |
+| 0xBF | TXEQ_CTRL | 0xBB801303 | bits 0-1 NSECT, bits 8-15 GEN, bits 16-31 FS |
 | 0xC8 | INFO_TXEQ (read only) | 0 | bits 0-1 sections in use, bit 2 running, bit 3 change in progress, bits 8-15 GEN in use, bits 16-31 saturation count |
+| 0xC9 | INFO_TXEQPAGE (read only) | "TXEQ" (0x51455854) | settings page marker, see below |
 
 - **Coefficients**: signed 32 bit, Q3.29, so 1.0 is 0x20000000 and the range is -4 to +4. Each section computes `y = b0 x + b1 x1 + b2 x2 - a1 y1 - a2 y2` (a0 is 1; a1 and a2 have the usual sign, as scipy and the RBJ cookbook give them).
 - **NSECT**: how many sections are used, from section 0 up. 0 means off.
@@ -22,7 +23,18 @@ All are ordinary AIOC settings registers, read and written through the HID featu
 - **FS**: the sample rate in Hz the coefficients were designed for. If playback runs at any other rate the equaliser stays off. 0 means use them at any rate.
 - **Saturation count**: how many samples were clipped (inside the filter or at the output) since the last change. It stops at 65535. 0xC8 is only updated while playback is running.
 
-The addresses were unused in v1.4.1 and in every upstream branch (development, autoptt, hwcos, the k1-aioc-rev1.x branches). A settings page stored by v1.4.1 holds zero there, so it loads as "off".
+The addresses were unused in v1.4.1 and in every upstream branch (development, autoptt, hwcos, the k1-aioc-rev1.x branches). A settings page stored by v1.4.1 holds zero at all of them.
+
+## Stored settings and the equaliser
+
+Which EQ registers the AIOC loads at power-up depends on the settings page in flash (`settings_page.c`):
+
+- **Nothing stored** (the page is erased, as after flashing a full image): the firmware defaults, so `k5-red` on.
+- **A page with 0xC9 = "TXEQ"**: this firmware always holds that marker in RAM, so every page it stores carries it. The EQ registers load exactly as stored, off included.
+- **A page with a nonzero TXEQ_CTRL but no marker**: stored by v1.4.1-packet.1 with a set loaded. Loads as stored.
+- **Any other page**: stored by firmware without the equaliser (stock v1.4.x), or by v1.4.1-packet.1 with it off. The rest of the page loads as stored and the EQ registers get the defaults, so `k5-red` comes on.
+
+The marker is read only, so the host cannot clear or forge it. The page is copied into RAM from address 0 upwards, so TXEQ_CTRL is always written after the coefficients, as when the host loads a set. A developer build with `make TXEQ_DEFAULT=off` has off as its defaults, and the same rules apply.
 
 ## How a change is applied
 
@@ -56,7 +68,7 @@ Check it took: `tools/aioc_eq.py status` while audio is playing should say it is
 
 ## The k5-red profile
 
-This is what `tools/aioc_eq.py apply k5-red` loads and what the `-k5-red` release image has as its default. It came from `eq.py` with no options, for a red rev 1.0 AIOC into a UV-K5 running the packet firmware, measured over the air on 2026-09-28 (deviation 0x862, -12 dBFS):
+This is what `tools/aioc_eq.py apply k5-red` loads and what the firmware has as its default. It came from `eq.py` with no options, for a red rev 1.0 AIOC into a UV-K5 running the packet firmware, measured over the air on 2026-09-28 (deviation 0x862, -12 dBFS):
 
 | Section | Type | Frequency | Gain | Q |
 |---|---|---|---|---|
@@ -115,17 +127,16 @@ To load a set: write 0xB0 to 0xBE first, then 0xBF. The control word commits the
 
 ## Reverting
 
-- Switch it off: `tools/aioc_eq.py off` (a 10 ms fade, then bit-exact stock audio). Add `--store` if you had stored it on.
-- Or power-cycle the AIOC, if you never stored it.
+- Switch it off: `tools/aioc_eq.py off` (a 10 ms fade, then bit-exact stock audio). Add `--store` to keep it off over power-off, since it is on by default.
 - Or flash stock AIOC firmware back (see the README).
 
 ## Tests
 
-`make -C bench test` compiles the firmware's own `tx_eq.c` with the host gcc (with the undefined-behaviour and address sanitizers) and checks: bypass is bit-exact (defaults, NSECT 0, wrong sample rate, and after switching off); the fixed-point output matches a double-precision reference to within the 16-bit rounding (gain within 0.01 dB, error under 0.36 LSB rms, 20 Hz to 12 kHz); saturation clamps with no wraparound, at the output and inside; extreme coefficients cannot overflow; silence decays to exact zero with no limit cycle; a set written word by word during playback never leaks before its commit, and switching sets, switching on and switching off cause no step or overshoot beyond the steady signals.
+`make -C bench test` compiles the firmware's own `tx_eq.c` and `settings_page.c` with the host gcc (with the undefined-behaviour and address sanitizers) and checks: bypass is bit-exact (defaults, NSECT 0, wrong sample rate, and after switching off); the fixed-point output matches a double-precision reference to within the 16-bit rounding (gain within 0.01 dB, error under 0.36 LSB rms, 20 Hz to 12 kHz); saturation clamps with no wraparound, at the output and inside; extreme coefficients cannot overflow; silence decays to exact zero with no limit cycle; a set written word by word during playback never leaks before its commit, and switching sets, switching on and switching off cause no step or overshoot beyond the steady signals. For the settings page, built both ways (defaults `k5-red` and off), it checks the rules above for stock, v1.4.1-packet.1 and marked pages, that everything outside the EQ block loads as stored, and that store then recall gives back the same registers, a stored "off" included.
 
 ## Flashing
 
 See the README for flashing, backing up and recovery. Two details for people building their own images:
 
-- The full `.bin` is 128000 bytes and ends with the settings page at 0x0801F000 filled with 0xFF. Upstream does this on purpose: flashing it wipes the stored settings, and the AIOC boots with firmware defaults. That includes the PTT mapping, register 0x24, whose default adds serial DTR-and-not-RTS as a PTT source.
-- An image without the settings page leaves the stored settings as they are (a page stored by v1.4.1 reads as zero at 0xB0 to 0xBF, so the equaliser is off): `arm-none-eabi-objcopy -O binary -R .eeprom aioc-fw.elf aioc-fw-keep-settings.bin`, which `make` also produces. DFU only erases the pages it writes.
+- The full `.bin` is 128000 bytes and ends with the settings page at 0x0801F000 filled with 0xFF. Upstream does this on purpose: flashing it wipes the stored settings, and the AIOC boots with firmware defaults, the equaliser on included. That includes the PTT mapping, register 0x24, whose default adds serial DTR-and-not-RTS as a PTT source.
+- An image without the settings page leaves the stored settings as they are, with the EQ registers following the rules in "Stored settings and the equaliser": `arm-none-eabi-objcopy -O binary -R .eeprom aioc-fw.elf aioc-fw-keep-settings.bin`, which `make` also produces. DFU only erases the pages it writes.

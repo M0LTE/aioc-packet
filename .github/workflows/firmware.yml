@@ -59,16 +59,16 @@ jobs:
 
       - name: Build
         run: |
-          make -j"$(nproc)" BUILD=build/plain
-          make -j"$(nproc)" BUILD=build/k5-red TXEQ_DEFAULT=k5-red
+          make -j"$(nproc)" BUILD=build/release
+          # Developer option (equaliser off by default): built to keep it compiling, not published
+          make -j"$(nproc)" BUILD=build/eq-off TXEQ_DEFAULT=off
 
       - name: Package
         run: |
           mkdir dist
-          cp build/plain/aioc-fw.bin                "dist/aioc-packet-$VERSION.bin"
-          cp build/plain/aioc-fw-keep-settings.bin  "dist/aioc-packet-$VERSION-keep-settings.bin"
-          cp build/plain/aioc-fw.hex                "dist/aioc-packet-$VERSION.hex"
-          cp build/k5-red/aioc-fw.bin               "dist/aioc-packet-$VERSION-k5-red.bin"
+          cp build/release/aioc-fw.bin                "dist/aioc-packet-$VERSION.bin"
+          cp build/release/aioc-fw-keep-settings.bin  "dist/aioc-packet-$VERSION-keep-settings.bin"
+          cp build/release/aioc-fw.hex                "dist/aioc-packet-$VERSION.hex"
           (cd dist && sha256sum -- *.bin *.hex > SHA256SUMS && cat SHA256SUMS)
           {
             arm-none-eabi-gcc --version | head -n 1
