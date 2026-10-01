@@ -147,14 +147,14 @@ See the README for flashing, backing up and recovery. Two details for people bui
 
 A fixed equaliser in the AIOC's receive path (the ADC, which hears the radio's speaker output, to USB audio IN). It undoes the UV-K5's receive audio high-pass, so that 9600 baud FSK decodes. It comes on by default. Switched off, the received audio is bit-for-bit what stock v1.4.1 sends.
 
-Why: the K5's audio output stage rolls off below about 128 Hz like two first-order high-passes at the same frequency (second order, Q 0.5). Its loss is mild, but its phase shift smears 9600 baud FSK: on the bench, 0 of 70 frames decoded from the K5's audio, while the same transmissions decoded from a flat SDR. Run offline on those recordings, this equaliser gave 70 of 70 on three decoders, and left 1200 baud AFSK and 3600 baud QPSK decoding as before. The AIOC's input (rev 1.0: a high-pass at about 7 Hz) is not the cause, so the correction is the radio's and suits any AIOC board.
+Why: the K5's audio output stage rolls off below about 128 Hz like two first-order high-passes at the same frequency (second order, Q 0.5). Its loss is mild, but its phase shift smears 9600 baud FSK: in recordings of the K5's audio, 0 of 70 frames decoded, while the same transmissions decoded from a flat SDR. Run offline on those recordings (the model of the same filter), this equaliser gave 70 of 70 on three decoders, and left 1200 baud AFSK and 3600 baud QPSK decoding as before. Live on the bench, with this firmware in the AIOC, 9600 baud went from 0 of 60 frames to 60 of 60 on three decoders. The AIOC's input (rev 1.0: a high-pass at about 7 Hz) is not the cause, so the correction is the radio's and suits any AIOC board.
 
 ## Registers
 
 | Address | Name | Default | Contents |
 |---|---|---|---|
 | 0xAF | RXEQ_CTRL | 1 | 0 off, 1 the UV-K5 profile; any other value is reserved and means off |
-| 0xCA | INFO_RXEQ (read only) | 0 | bits 0-7 profile in use, bit 8 running, bit 9 change in progress, bit 10 switched off by the overload guard, bits 11-15 times the guard tripped since power-up, bits 16-31 saturation count |
+| 0xCA | INFO_RXEQ (read only) | 0 | bits 0-7 profile in use, bit 8 running, bit 9 change in progress, bit 10 switched off by the overload guard, bits 11-15 times the guard tripped since the AIOC last started (power-up or any reset), bits 16-31 saturation count |
 | 0xCB | INFO_RXEQPAGE (read only) | "RXEQ" (0x51455852) | settings page marker, see below |
 | 0xCC | INFO_RXEQCYC (read only) | 0 | bits 0-15 the most CPU cycles per sample in any one block, bits 16-31 the average per sample over the last 4096 samples or more |
 
@@ -224,9 +224,13 @@ How:
 What changes for the host:
 
 - **Delay**: recording gains 1 ms (a block goes to USB when it is complete); the receive equaliser's own 7.0 ms is on top of that when it runs. Playback gains 1 ms: the playback buffer the USB feedback keeps filled now counts the DMA buffer as well as the USB FIFO, and its target is upstream's 5 ms plus one block, so the FIFO keeps the same margin against late USB packets as before. Registers 0xDA to 0xDC (the buffer level average, minimum and maximum) count both, 576 bytes at 48 kHz on target.
-- **Virtual PTT**: the level is checked per block, ahead of the DAC, so PTT comes on 1 to 2 ms before the audio reaches the radio and goes off 1 to 2 ms sooner after the last loud sample (18 to 19 ms after it with the default 20 ms timeout).
+- **Virtual PTT**: the level is checked per block, ahead of the DAC, so PTT comes on 1 to 2 ms before the audio reaches the radio and goes off the timeout less 1 to 2 ms after the last loud sample is played (18 to 19 ms with the default 20 ms timeout). So keep the virtual PTT timeout (0x84) at about 3 ms or more: below that, PTT can drop between two blocks of continuous audio, or before the last block is played.
 - **Virtual COS**: checked per block, so it comes on and goes off up to 1 ms later than before, in step with the 1 ms the recorded audio gained.
 - **HID reports**: the virtual COS timer (TIM17) and the input pins (EXTI) no longer send HID reports from their interrupts. They note the change, and the main loop sends it, within a pass (well under 1 ms). tinyusb is not re-entrant, and those interrupts could cut into it anywhere.
+- **State bits**: the PTT1, PTT2, virtual PTT and virtual COS states are in register 0xC0 (bits 16, 17, 24 and 28), as their definitions in settings.h say. Upstream ORs them into 0xD0 instead, over its record mute bits and its record and play state fields, so there a running recording read as 3 rather than 2 while virtual PTT was on.
+- **USB resets**: a USB bus reset (a host reboot, a port reset, some suspend and resume paths) closes no stream, so the AIOC stops both directions itself when the host configures it again, and each stream stops whatever is still running before it starts. Before, a playback DMA left running drained the new stream's buffer, so it never started.
+- **Fox hunt**: with the fox hunt on, its timer (TIM15) triggers the DAC. While the host plays, playback takes the DAC (TIM6, at the host's rate, and the fox hunt's samples are not written) and gives it back when playback stops.
+- **Underruns**: the DMA serves every conversion long before the next, so neither converter should ever miss one. If the ADC does, an overrun interrupt clears it and recording carries on one sample short; if the DAC does, an underrun interrupt restarts playback from two fresh blocks. Either way the stream does not stop for good.
 
 Registers (read only, free in v1.4.1, every upstream branch and earlier aioc-packet releases):
 

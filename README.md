@@ -123,9 +123,9 @@ The quansheng-packet firmware's default deviation (0x856) assumes this equaliser
 
 ## What the receive equaliser does
 
-A UV-K5's receive audio loses its low frequencies: its audio output stage has a high-pass filter at about 128 Hz. The loss itself is mild, but the filter also shifts the timing of the low-frequency part of the signal, and that is what breaks 9600 baud packet. On the bench, a decoder got 0 of 70 packets from the K5's audio, while the same transmissions decoded fine from a flat receiver. The AIOC's own input is not the problem (it is flat down to about 7 Hz).
+A UV-K5's receive audio loses its low frequencies: its audio output stage has a high-pass filter at about 128 Hz. The loss itself is mild, but the filter also shifts the timing of the low-frequency part of the signal, and that is what breaks 9600 baud packet. In recordings of the K5's audio, a decoder got 0 of 70 packets, while the same transmissions decoded fine from a flat receiver. The AIOC's own input is not the problem (it is flat down to about 7 Hz).
 
-The receive equaliser in the AIOC undoes that filter, level and timing, so every modem on the computer gets a flat signal without needing to know about it. On the recordings of those 70 packets, the same filter as in this firmware let three different decoders get all 70. 1200 baud AFSK and 3600 baud QPSK decode as well as before.
+The receive equaliser in the AIOC undoes that filter, level and timing, so every modem on the computer gets a flat signal without needing to know about it. Run offline over the recordings of those 70 packets, the same filter as in this firmware let three different decoders get all 70. Then on the bench, live with this firmware in the AIOC, 9600 baud went from 0 of 60 frames to 60 of 60. 1200 baud AFSK and 3600 baud QPSK decode as well as before.
 
 - It is on by default, and it runs only while your software records at 48000 Hz. At any other rate the audio is untouched. It keeps running while your software transmits at the same time, as packet modems do.
 - It delays received audio by 7.0 ms (8 ms with the AIOC's 1 ms blocks). That makes no difference to packet.
