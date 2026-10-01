@@ -7,6 +7,10 @@ _Static_assert(SETTINGS_REG_TXEQ_COEF0 + SETTINGS_REG_TXEQ_COEF_COUNT == SETTING
                "TXEQ_CTRL must sit directly above the coefficients");
 _Static_assert(SETTINGS_REG_INFO_TXEQPAGE >= SETTINGS_REGMAP_READONLYADDR,
                "the page marker must be read only, so the host cannot clear or forge it");
+_Static_assert(SETTINGS_REG_INFO_RXEQPAGE >= SETTINGS_REGMAP_READONLYADDR,
+               "the page marker must be read only, so the host cannot clear or forge it");
+_Static_assert(SETTINGS_REG_RXEQ_CTRL < SETTINGS_REGMAP_READONLYADDR,
+               "the RX EQ control register must be writable");
 
 uint8_t SettingsPage_EqFromPage(const volatile uint32_t *page)
 {
@@ -14,9 +18,15 @@ uint8_t SettingsPage_EqFromPage(const volatile uint32_t *page)
         || (page[SETTINGS_REG_TXEQ_CTRL] != 0);
 }
 
+uint8_t SettingsPage_RxEqFromPage(const volatile uint32_t *page)
+{
+    return page[SETTINGS_REG_INFO_RXEQPAGE] == SETTINGS_REG_INFO_RXEQPAGE_MARKER;
+}
+
 void SettingsPage_Load(volatile uint32_t *regs, const volatile uint32_t *page)
 {
     uint8_t eqFromPage = SettingsPage_EqFromPage(page);
+    uint8_t rxEqFromPage = SettingsPage_RxEqFromPage(page);
 
     for (uint32_t addr = 0; addr < SETTINGS_REGMAP_SIZE; addr++) {
         uint32_t value = page[addr];
@@ -27,6 +37,13 @@ void SettingsPage_Load(volatile uint32_t *regs, const volatile uint32_t *page)
             value = SETTINGS_REG_TXEQ_CTRL_DEFAULT;
         } else if (addr == SETTINGS_REG_INFO_TXEQPAGE) {
             value = SETTINGS_REG_INFO_TXEQPAGE_MARKER;
+        } else if (!rxEqFromPage && (addr == SETTINGS_REG_RXEQ_CTRL)) {
+            value = SETTINGS_REG_RXEQ_CTRL_DEFAULT;
+        } else if (addr == SETTINGS_REG_INFO_RXEQPAGE) {
+            value = SETTINGS_REG_INFO_RXEQPAGE_MARKER;
+        } else if ((addr == SETTINGS_REG_INFO_RXEQ) || (addr == SETTINGS_REG_INFO_RXEQCYC)
+                   || (addr == SETTINGS_REG_INFO_RXCYC) || (addr == SETTINGS_REG_INFO_TXCYC)) {
+            value = 0;
         }
 
         /* Ascending and volatile: the audio interrupt may run between two words, and it only
@@ -41,4 +58,5 @@ void SettingsPage_EqDefaults(volatile uint32_t *regs)
         regs[SETTINGS_REG_TXEQ_COEF0 + i] = txEqCoefDefaults[i];
     }
     regs[SETTINGS_REG_TXEQ_CTRL] = SETTINGS_REG_TXEQ_CTRL_DEFAULT;
+    regs[SETTINGS_REG_RXEQ_CTRL] = SETTINGS_REG_RXEQ_CTRL_DEFAULT;
 }

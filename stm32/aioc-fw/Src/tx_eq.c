@@ -191,6 +191,89 @@ int16_t TxEq_Process(txeq_t *eq, int16_t x)
     return (int16_t) Clamp(eq, out, -32768, 32767);
 }
 
+/* Run n samples (internal scale, in place) through one section: RunBank's arithmetic, with
+ * the coefficients and the state in registers for the whole block */
+static void RunSection(txeq_t *eq, const txeq_coef_t *c, txeq_state_t *st, int32_t *s, uint32_t n)
+{
+    const int32_t b0 = c->b0, b1 = c->b1, b2 = c->b2, a1 = c->a1, a2 = c->a2;
+    int32_t x1 = st->x1, x2 = st->x2, y1 = st->y1, y2 = st->y2, e = st->e;
+
+    for (uint32_t i = 0; i < n; i++) {
+        int32_t x = s[i];
+        int64_t acc = e;
+        acc += (int64_t) b0 * x;
+        acc += (int64_t) b1 * x1;
+        acc += (int64_t) b2 * x2;
+        acc -= (int64_t) a1 * y1;
+        acc -= (int64_t) a2 * y2;
+
+        int64_t yFull = acc >> TXEQ_COEF_FRAC;
+        e = (int32_t) (acc - yFull * ((int64_t) 1 << TXEQ_COEF_FRAC));
+
+        int32_t y = Clamp(eq, yFull, -TXEQ_SIG_LIMIT, TXEQ_SIG_LIMIT - 1);
+        if (y != yFull) {
+            e = 0;
+        }
+
+        x2 = x1;
+        x1 = x;
+        y2 = y1;
+        y1 = y;
+        s[i] = y;
+    }
+
+    st->x1 = x1;
+    st->x2 = x2;
+    st->y1 = y1;
+    st->y2 = y2;
+    st->e = e;
+}
+
+void TxEq_ProcessBlock(txeq_t *eq, int16_t *x, uint32_t n)
+{
+    if (eq->phase != PHASE_IDLE) {
+        /* Settling or crossfading: sample by sample */
+        for (uint32_t i = 0; i < n; i++) {
+            x[i] = TxEq_Process(eq, x[i]);
+        }
+        return;
+    }
+
+    /* Idle: one set, so each section can run over the whole block in turn (the sections only
+     * see each other's output, and the clip count is a sum). Same arithmetic, same result */
+    txeq_bank_t *cur = &eq->bank[eq->cur];
+    while (n > 0) {
+        uint32_t m = (n < TXEQ_BLOCK_MAX) ? n : TXEQ_BLOCK_MAX;
+
+        /* The last two inputs, for the next change's history (as TxEq_Process keeps them) */
+        if (m >= 2) {
+            eq->h2 = x[m - 2];
+        } else {
+            eq->h2 = eq->h1;
+        }
+        eq->h1 = x[m - 1];
+
+        if (cur->nsect > 0) {
+            int32_t s[TXEQ_BLOCK_MAX];
+            for (uint32_t i = 0; i < m; i++) {
+                s[i] = (int32_t) x[i] * (1 << TXEQ_SIG_SHIFT);
+            }
+            for (uint8_t k = 0; k < cur->nsect; k++) {
+                RunSection(eq, &cur->coef[k], &cur->state[k], s, m);
+            }
+            for (uint32_t i = 0; i < m; i++) {
+                /* Round to int16 and saturate */
+                int32_t out = (s[i] + ((int32_t) 1 << (TXEQ_SIG_SHIFT - 1))) >> TXEQ_SIG_SHIFT;
+                x[i] = (int16_t) Clamp(eq, out, -32768, 32767);
+            }
+        }
+        /* else bypass: untouched */
+
+        x += m;
+        n -= m;
+    }
+}
+
 uint32_t TxEq_Status(const txeq_t *eq)
 {
     const txeq_bank_t *cur = &eq->bank[eq->cur];

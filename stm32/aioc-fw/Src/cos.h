@@ -7,6 +7,9 @@
 #include "usb_serial.h"
 #include "settings.h"
 
+/* Show a virtual COS change: the LED, and the CM108 buttons and serial lines mapped to VCOS.
+ * Main loop only: it sends HID reports, and tinyusb is not re-entrant, so an interrupt must not
+ * call it (the TIM17 interrupt leaves the change for USB_AudioTask) */
 static inline void COS_VirtualSetState(uint8_t state)
 {
     LED_SET(0, state & 0x01 ? 1 : 0);

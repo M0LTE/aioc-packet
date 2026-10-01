@@ -1,6 +1,6 @@
 /*
  * Host unit tests for loading a stored settings page (stm32/aioc-fw/Src/settings_page.c):
- * which EQ registers a page gives you, depending on which firmware stored it.
+ * which TX and RX EQ registers a page gives you, depending on which firmware stored it.
  * Build and run: make -C bench test
  *
  * Compiled twice, as the firmware is: with the default EQ profile (k5-red) and with
@@ -22,6 +22,8 @@ static int failures;
 #define EQN   (SETTINGS_REG_TXEQ_COEF_COUNT + 1)   /* coefficients and the control word */
 #define CTRL  SETTINGS_REG_TXEQ_CTRL
 #define MARK  SETTINGS_REG_INFO_TXEQPAGE
+#define RXCTL SETTINGS_REG_RXEQ_CTRL
+#define RXMRK SETTINGS_REG_INFO_RXEQPAGE
 
 static const uint32_t K5_RED[EQN] = {
     0x1FC74BD8, 0xC0E42580, 0x1F551D69, 0xC0E42580, 0x1F1C6941,
@@ -38,9 +40,11 @@ static const uint32_t ZERO[EQN];
 /* What this build should load for the EQ registers when a page predates the equaliser */
 #ifndef TXEQ_DEFAULT_OFF
 static const uint32_t *const DEFAULTS = K5_RED;
-#define BUILD_NAME "default build (k5-red)"
+#define RX_DEFAULT 1u
+#define BUILD_NAME "default build (k5-red, RX EQ on)"
 #else
 static const uint32_t *const DEFAULTS = ZERO;
+#define RX_DEFAULT 0u
 #define BUILD_NAME "TXEQ_DEFAULT_OFF build"
 #endif
 
@@ -70,11 +74,13 @@ static int EqIs(const uint32_t *regs, const uint32_t *eq)
     return memcmp(&regs[EQ0], eq, EQN * sizeof(uint32_t)) == 0;
 }
 
-/* Every register outside the EQ block and the marker is the page's, word for word */
+/* Every register outside the EQ registers and markers is the page's, word for word */
 static int RestIsPage(const uint32_t *regs, const uint32_t *page)
 {
     for (int a = 0; a < SETTINGS_REGMAP_SIZE; a++) {
         if ((a >= EQ0 && a <= CTRL) || a == MARK) continue;
+        if (a == RXCTL || a == RXMRK || a == SETTINGS_REG_INFO_RXEQ || a == SETTINGS_REG_INFO_RXEQCYC) continue;
+        if (a == SETTINGS_REG_INFO_RXCYC || a == SETTINGS_REG_INFO_TXCYC) continue;
         if (regs[a] != page[a]) return 0;
     }
     return 1;
@@ -95,6 +101,9 @@ static void TestStockPage(void)
     CHECK(EqIs(regs, DEFAULTS), "stock page: the EQ registers must be the build's defaults");
     CHECK(RestIsPage(regs, page), "stock page: every other setting must come from the page");
     CHECK(regs[MARK] == SETTINGS_REG_INFO_TXEQPAGE_MARKER, "the marker must be set after a recall");
+    CHECK(!SettingsPage_RxEqFromPage(page), "a stock page must not count as having RX EQ settings");
+    CHECK(regs[RXCTL] == RX_DEFAULT, "stock page: RXEQ_CTRL 0x%08X, expected the default", regs[RXCTL]);
+    CHECK(regs[RXMRK] == SETTINGS_REG_INFO_RXEQPAGE_MARKER, "the RX marker must be set after a recall");
 }
 
 static void TestForkPageEqOff(void)
@@ -161,6 +170,58 @@ static void TestOtherMarkerValue(void)
     CHECK(EqIs(regs, DEFAULTS), "a wrong marker value must be treated as no marker");
 }
 
+static void TestPacket2Page(void)
+{
+    /* v1.4.1-packet.2 stored the TX marker but knew nothing of the RX equaliser: RXEQ_CTRL is
+     * zero on its pages, and it gets the default. The TX registers load as stored */
+    uint32_t page[SETTINGS_REGMAP_SIZE], regs[SETTINGS_REGMAP_SIZE];
+    StockPage(page);
+    page[MARK] = SETTINGS_REG_INFO_TXEQPAGE_MARKER;
+    Load(regs, page);
+    CHECK(EqIs(regs, ZERO), "packet.2 page with TX EQ off: stays off");
+    CHECK(regs[RXCTL] == RX_DEFAULT, "packet.2 page: RXEQ_CTRL 0x%08X, expected the default", regs[RXCTL]);
+    CHECK(RestIsPage(regs, page), "packet.2 page: every other setting must come from the page");
+    SetEq(page, K5_RED);
+    Load(regs, page);
+    CHECK(EqIs(regs, K5_RED) && regs[RXCTL] == RX_DEFAULT, "packet.2 page with TX EQ on");
+}
+
+static void TestRxPages(void)
+{
+    /* Stored by this firmware: both markers. RXEQ_CTRL loads exactly as stored, off included */
+    static const uint32_t values[] = { 0, 1, 7, 0xFFFFFFFF };
+    uint32_t page[SETTINGS_REGMAP_SIZE], regs[SETTINGS_REGMAP_SIZE];
+    for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+        StockPage(page);
+        page[MARK] = SETTINGS_REG_INFO_TXEQPAGE_MARKER;
+        page[RXMRK] = SETTINGS_REG_INFO_RXEQPAGE_MARKER;
+        page[RXCTL] = values[i];
+        page[SETTINGS_REG_INFO_RXEQ] = 0x00030101;        /* live status when it was stored */
+        page[SETTINGS_REG_INFO_RXEQCYC] = 0x00C800F0;
+        page[SETTINGS_REG_INFO_RXCYC] = 0x2EE03A98;
+        page[SETTINGS_REG_INFO_TXCYC] = 0x0FA01200;
+        CHECK(SettingsPage_RxEqFromPage(page), "a page with the RX marker must count as having RX EQ settings");
+        Load(regs, page);
+        CHECK(regs[RXCTL] == values[i], "RX marker page: RXEQ_CTRL 0x%08X, stored 0x%08X", regs[RXCTL], values[i]);
+        CHECK(regs[SETTINGS_REG_INFO_RXEQ] == 0 && regs[SETTINGS_REG_INFO_RXEQCYC] == 0,
+              "the RX status registers must start at zero, not the page's");
+        CHECK(regs[SETTINGS_REG_INFO_RXCYC] == 0 && regs[SETTINGS_REG_INFO_TXCYC] == 0,
+              "the audio cycle counts must start at zero, not the page's");
+        CHECK(RestIsPage(regs, page), "RX marker page: every other setting must come from the page");
+    }
+
+    /* A wrong RX marker value is no marker; the RX marker does not affect the TX rules */
+    StockPage(page);
+    page[RXMRK] = SETTINGS_REG_INFO_RXEQPAGE_MARKER ^ 0x100;
+    page[RXCTL] = 0;
+    Load(regs, page);
+    CHECK(regs[RXCTL] == RX_DEFAULT, "a wrong RX marker value must be treated as no marker");
+    StockPage(page);
+    page[RXMRK] = SETTINGS_REG_INFO_RXEQPAGE_MARKER;
+    Load(regs, page);
+    CHECK(EqIs(regs, DEFAULTS), "an RX marker alone must not make the TX registers count as stored");
+}
+
 static void TestRoundTrip(void)
 {
     /* This firmware: defaults, store (the whole RAM map), recall gives the same map. Then the
@@ -169,13 +230,16 @@ static void TestRoundTrip(void)
     StockPage(ram);
     SettingsPage_EqDefaults(ram);
     ram[MARK] = SETTINGS_REG_INFO_TXEQPAGE_DEFAULT;
+    ram[RXMRK] = SETTINGS_REG_INFO_RXEQPAGE_DEFAULT;
     CHECK(EqIs(ram, DEFAULTS), "SettingsPage_EqDefaults must write the build's defaults");
+    CHECK(ram[RXCTL] == RX_DEFAULT, "SettingsPage_EqDefaults must write the build's RX default");
 
     memcpy(page, ram, sizeof(page));
     Load(regs, page);
     CHECK(memcmp(regs, ram, sizeof(regs)) == 0, "store then recall must give back the same registers");
 
     SetEq(ram, ZERO);
+    ram[RXCTL] = 0;
     memcpy(page, ram, sizeof(page));
     Load(regs, page);
     CHECK(memcmp(regs, ram, sizeof(regs)) == 0, "stored off, recalled off");
@@ -184,6 +248,13 @@ static void TestRoundTrip(void)
     memcpy(page, regs, sizeof(page));
     Load(regs, page);
     CHECK(EqIs(regs, ZERO), "still off after a second store and recall");
+    CHECK(regs[RXCTL] == 0, "RX EQ still off after a second store and recall");
+
+    /* RX on again, stored: on after the next power-up, whatever the build's default */
+    regs[RXCTL] = 1;
+    memcpy(page, regs, sizeof(page));
+    Load(regs, page);
+    CHECK(regs[RXCTL] == 1, "RX EQ stored on, recalled on");
 }
 
 int main(void)
@@ -195,6 +266,8 @@ int main(void)
     TestForkPageStaleCoefsOff();
     TestPacket1Pages();
     TestOtherMarkerValue();
+    TestPacket2Page();
+    TestRxPages();
     TestRoundTrip();
     if (failures) {
         printf("%d failure(s)\n", failures);

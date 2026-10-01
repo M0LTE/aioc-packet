@@ -22,6 +22,9 @@
  * TXEQ_SETTLE_LEN samples, so its start-up transient dies away unheard, and the output
  * crossfades from the old set to the new one over TXEQ_FADE_LEN samples. Enabling and
  * disabling go through the same crossfade (bypass counts as a set with no sections).
+ *
+ * The firmware runs it on blocks of 1 ms (TxEq_ProcessBlock), the output bit for bit that of
+ * running it sample by sample.
  */
 
 #include <stdint.h>
@@ -35,6 +38,7 @@
 #define TXEQ_SETTLE_LEN     4096    /* samples, 85 ms at 48 kHz */
 #define TXEQ_FADE_SHIFT     9
 #define TXEQ_FADE_LEN       (1 << TXEQ_FADE_SHIFT)  /* samples, 10.7 ms at 48 kHz */
+#define TXEQ_BLOCK_MAX      48      /* TxEq_ProcessBlock works in pieces of at most this */
 
 /* Control word fields, identical to settings register SETTINGS_REG_TXEQ_CTRL */
 #define TXEQ_CTRL_NSECT_OFFS    0
@@ -100,6 +104,12 @@ void TxEq_Poll(txeq_t *eq, uint32_t ctrl, const volatile uint32_t *coefs, uint32
 
 /* Filter one sample. In bypass (and not fading) returns x unchanged. */
 int16_t TxEq_Process(txeq_t *eq, int16_t x);
+
+/* Filter a block of n samples in place, exactly as n calls of TxEq_Process. Call TxEq_Poll
+ * once per block before it: a new set then takes over at a block boundary. With no change in
+ * progress it runs each section over the whole block in turn, which keeps a section's
+ * coefficients and state in registers */
+void TxEq_ProcessBlock(txeq_t *eq, int16_t *x, uint32_t n);
 
 /* Status word for the read-only info register */
 uint32_t TxEq_Status(const txeq_t *eq);

@@ -2,6 +2,7 @@
 #include "usb_hid.h"
 #include "tusb.h"
 #include "settings.h"
+#include "diag.h"
 #include "usb_descriptors.h"
 
 #define USB_HID_INOUT_REPORT_LEN  4
@@ -166,7 +167,9 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
             }
 
             if (ctrlWord & 0x20UL) {
-                /* Reboot */
+                /* Reboot. Noted for the reset diagnostics, which would otherwise see a watchdog
+                 * reset with the main loop stuck */
+                diagRecord.reboot = DIAG_MAGIC_REBOOT;
                 while(1) {
                     /* Let IWDG expire for rebooting */
                 }

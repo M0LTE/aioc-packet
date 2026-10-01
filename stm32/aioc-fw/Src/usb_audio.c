@@ -6,7 +6,11 @@
 #include "usb.h"
 #include "cos.h"
 #include "tx_eq.h"
+#include "rx_eq.h"
+#include "diag.h"
+#include "audio_block.h"
 #include <math.h>
+#include <string.h>
 
 /* The one and only supported sample rate */
 #define DEFAULT_SAMPLE_RATE   	48000
@@ -16,8 +20,33 @@
 #define SPEAKER_BUFFERLVL_AVG   64
 /* This is the amount of buffer level to feedback coupling with a denominator of 65536 to prevent buffer drift */
 #define SPEAKER_BUFLVL_FB_COUPLING 1
-/* We try to stay on this target with the buffer level */
-#define SPEAKER_BUFFERLVL_TARGET (5 * CFG_TUD_AUDIO_EP_SZ_OUT) /* Keep our buffer at 5 frames, i.e. 5ms at full-speed USB and maximum sample rate */
+/* We try to stay on this target with the buffer level: 5 frames, i.e. 5ms at full-speed USB and maximum sample rate,
+ * as upstream, plus one block. The level counts what the DMA buffer still holds as well as the USB FIFO, and the
+ * DMA takes a block from the FIFO at a time, so the extra block keeps the FIFO as far from running dry as before */
+#define SPEAKER_BUFFERLVL_TARGET (5 * CFG_TUD_AUDIO_EP_SZ_OUT)
+
+/* Playback by DMA: TIM6 triggers the DAC, and at every trigger DMA2 channel 3 (DAC1 channel
+ * 1's request, not remapped) loads the next sample from dacBuf, circular. dacBuf has two
+ * halves of one block (1 ms) each; when the DMA moves on from one half, its interrupt refills
+ * that half with the next block from USB */
+#define DAC_DMA             DMA2
+#define DAC_DMA_CH          DMA2_Channel3
+#define DAC_DMA_IRQn        DMA2_Channel3_IRQn
+#define DAC_DMA_IRQHandler  DMA2_Channel3_IRQHandler
+#define DAC_DMA_IFCR_ALL    DMA_IFCR_CGIF3
+
+/* Recording by DMA: TIM3 triggers the ADC at the recording rate, and the DMA stores every
+ * result in adcBuf, circular, two halves of one block (1 ms) each; when the DMA moves on from
+ * one half, its interrupt processes that half and hands it to USB. ADC2 (direct input) has
+ * its requests on DMA2 channel 1, ADC1 (behind the OPAMP PGA) on DMA1 channel 1; only the one
+ * RX_Config picks runs */
+#define ADC1_DMA            DMA1
+#define ADC1_DMA_CH         DMA1_Channel1
+#define ADC1_DMA_IRQn       DMA1_Channel1_IRQn
+#define ADC2_DMA            DMA2
+#define ADC2_DMA_CH         DMA2_Channel1
+#define ADC2_DMA_IRQn       DMA2_Channel1_IRQn
+#define ADC_DMA_IFCR_ALL    DMA_IFCR_CGIF1      /* both on channel 1 of their controller */
 
 
 typedef enum {
@@ -58,6 +87,31 @@ static volatile uint32_t speakerSampleFreqCfg; /* Actual configured sample rate 
 static volatile state_t microphoneState = STATE_OFF;
 static volatile state_t speakerState = STATE_OFF;
 static txeq_t txEq; /* Playback equaliser, zero-initialised = bypass */
+static uint16_t dacBuf[2 * AUDIO_BLOCK_MAX]; /* Playback DMA buffer, two halves of speakerBlock samples */
+static uint32_t speakerBlock = AUDIO_BLOCK_MAX; /* Samples per block, set at playback start */
+static uint32_t speakerLevelTarget = SPEAKER_BUFFERLVL_TARGET + 2 * AUDIO_BLOCK_MAX; /* Bytes, see SPEAKER_BUFFERLVL_TARGET */
+static volatile uint8_t speakerFilled; /* Half of dacBuf filled most recently */
+static audio_cycles_t speakerCycles; /* Cycles per playback block */
+static uint16_t adcBuf[2 * AUDIO_BLOCK_MAX]; /* Recording DMA buffer, two halves of microphoneBlock samples */
+static uint32_t microphoneBlock = AUDIO_BLOCK_MAX; /* Samples per block, set at recording start */
+static audio_cycles_t microphoneCycles; /* Cycles per recording block */
+static rxeq_t rxEq; /* Recording equaliser, zero-initialised = bypass */
+static volatile uint8_t cosVirtualState; /* Virtual COS state, as the TIM17 interrupt last set it */
+static volatile uint8_t cosVirtualPending; /* ... and not yet shown (USB_AudioTask) */
+
+/* rx_eq.h has no HAL or settings dependencies; its control and status words are the registers' */
+_Static_assert(RXEQ_PROFILE_K5 == SETTINGS_REG_RXEQ_CTRL_PROFILE_K5_ENUM, "RX EQ profile numbers differ");
+_Static_assert(RXEQ_STATUS_OVERLOAD_MASK == SETTINGS_REG_INFO_RXEQ_OVERLOAD_MASK
+               && RXEQ_STATUS_OVERLOADS_OFFS == SETTINGS_REG_INFO_RXEQ_OVERLOADS_OFFS
+               && RXEQ_STATUS_OVERLOADS_MASK == SETTINGS_REG_INFO_RXEQ_OVERLOADS_MASK,
+               "RX EQ overload fields differ from the registers");
+_Static_assert(RXEQ_STATUS_PROFILE_MASK == SETTINGS_REG_INFO_RXEQ_PROFILE_MASK
+               && RXEQ_STATUS_ACTIVE_MASK == SETTINGS_REG_INFO_RXEQ_ACTIVE_MASK
+               && RXEQ_STATUS_FADE_MASK == SETTINGS_REG_INFO_RXEQ_FADE_MASK
+               && RXEQ_STATUS_CLIPS_OFFS == SETTINGS_REG_INFO_RXEQ_CLIPS_OFFS
+               && RXEQ_CYCLES_MAX_OFFS == SETTINGS_REG_INFO_RXEQCYC_MAX_OFFS
+               && RXEQ_CYCLES_AVG_OFFS == SETTINGS_REG_INFO_RXEQCYC_AVG_OFFS,
+               "RX EQ status fields differ from the registers");
 
 static audio_control_range_4_n_t(SAMPLERATE_COUNT) sampleFreqRng = {
     .wNumSubRanges = SAMPLERATE_COUNT,
@@ -78,9 +132,14 @@ static void Timer_ADC_Init(void);
 static void Timer_DAC_Init(void);
 static void ADC_Init(void);
 static void DAC_Init(void);
-static void RX_Config(usb_audio_rxgain_t rxGain);
+static ADC_TypeDef *RX_Config(usb_audio_rxgain_t rxGain);
 static void TX_Config(usb_audio_txboost_t txBoost);
 static void Timeout_Timers_Init(void);
+static void Speaker_Start(void);
+static void Speaker_Stop(void);
+static uint16_t Speaker_Level(void);
+static void Microphone_Start(ADC_TypeDef *adc);
+static void Microphone_Stop(void);
 
 
 //--------------------------------------------------------------------+
@@ -530,9 +589,7 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t rhport, uint8_t itf, uint8_t ep_in, u
                 (rxGainSetting == SETTINGS_REG_AUDIO_RX_RXGAIN_16X_ENUM) ? USB_AUDIO_RXGAIN_16X :
                 USB_AUDIO_RXGAIN_1X;
 
-        RX_Config(rxGain);
-
-        NVIC_EnableIRQ(ADC1_2_IRQn);
+        Microphone_Start(RX_Config(rxGain));
         microphoneState = STATE_RUN;
 
         /* Update debug register */
@@ -545,8 +602,8 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t rhport, uint8_t itf, uint8_t ep_in, u
 
 bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting)
 {
-    /* Get number of total bytes available in FIFO */
-    uint16_t count = tud_audio_available();
+    /* Get number of total bytes buffered: in the FIFO, and in the DMA buffer still to be played */
+    uint16_t count = Speaker_Level();
 
     /* Calculate min/max/average statistics of buffer fill level */
     if ( (count - n_bytes_received) < speakerBufferLvlMin) speakerBufferLvlMin = count - n_bytes_received;
@@ -554,22 +611,26 @@ bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received, u
     speakerBufferLvlAvg = ((uint64_t) speakerBufferLvlAvg * (65536 - SPEAKER_BUFFERLVL_AVG) + ((uint64_t) count << 16) * SPEAKER_BUFFERLVL_AVG) / 65536.0;
 
     if (speakerState == STATE_START) {
-        if (count >= SPEAKER_BUFFERLVL_TARGET) {
+        /* The block length follows the playback rate */
+        speakerBlock = AudioBlock_Len(speakerSampleFreq);
+        speakerLevelTarget = SPEAKER_BUFFERLVL_TARGET + speakerBlock * CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE;
+
+        if (count >= speakerLevelTarget) {
             /* Wait until we are at buffer target fill level, then start DAC output */
-            speakerState = STATE_RUN;
-            /* Start the TX equaliser afresh with the set in the registers now. The DAC interrupt
+            /* Start the TX equaliser afresh with the set in the registers now. The DMA interrupt
              * is still disabled here, so this cannot race with it */
             TxEq_Reset(&txEq, settingsRegMap[SETTINGS_REG_TXEQ_CTRL], &settingsRegMap[SETTINGS_REG_TXEQ_COEF0], speakerSampleFreq);
             TX_Config((settingsRegMap[SETTINGS_REG_AUDIO_TX] & SETTINGS_REG_AUDIO_TX_TXBOOST_MASK) ? USB_AUDIO_TXBOOST_ON : USB_AUDIO_TXBOOST_OFF);
-            NVIC_EnableIRQ(TIM6_DAC1_IRQn);
+            Speaker_Start();
+            speakerState = STATE_RUN;
 
             /* Update debug register */
             settingsRegMap[SETTINGS_REG_INFO_AUDIO0] = (settingsRegMap[SETTINGS_REG_INFO_AUDIO0] & ~SETTINGS_REG_INFO_AUDIO0_PLAYSTATE_MASK)
                                                    | (((uint32_t) SETTINGS_REG_INFO_AUDIO0_PLAYSTATE_RUN_ENUM) << SETTINGS_REG_INFO_AUDIO0_PLAYSTATE_OFFS);
         }
 
-        /* Initialize/override min/max/avg during startup buffering */
-        speakerBufferLvlAvg = count;
+        /* Initialize/override min/max/avg during startup buffering (the average is 16.16) */
+        speakerBufferLvlAvg = (uint32_t) count << 16;
         speakerBufferLvlMin = count;
         speakerBufferLvlMax = count;
     }
@@ -637,7 +698,7 @@ bool tud_audio_set_itf_close_EP_cb(uint8_t rhport, tusb_control_request_t const 
     switch (itf) {
     case ITF_NUM_AUDIO_STREAMING_IN:
         /* Microphone channel has been stopped */
-        NVIC_DisableIRQ(ADC1_2_IRQn);
+        Microphone_Stop();
         microphoneState = STATE_OFF;
 
         /* Update debug register */
@@ -647,7 +708,7 @@ bool tud_audio_set_itf_close_EP_cb(uint8_t rhport, tusb_control_request_t const 
 
     case ITF_NUM_AUDIO_STREAMING_OUT:
         /* Speaker channel has been stopped */
-        NVIC_DisableIRQ(TIM6_DAC1_IRQn);
+        Speaker_Stop();
         speakerState = STATE_OFF;
 
         /* Update debug register */
@@ -700,7 +761,7 @@ TU_ATTR_FAST_FUNC void tud_audio_feedback_interval_isr(uint8_t func_id, uint32_t
 
     /* Couple the buffer level bias to the feedback value to avoid buffer drift */
     if (speakerState == STATE_RUN) {
-        int32_t bias = (int32_t) speakerBufferLvlAvg - ((int32_t) SPEAKER_BUFFERLVL_TARGET << 16); /* 16.16 format same as feedback */
+        int32_t bias = (int32_t) speakerBufferLvlAvg - ((int32_t) speakerLevelTarget << 16); /* 16.16 format same as feedback */
         feedback -= ((int64_t) bias * SPEAKER_BUFLVL_FB_COUPLING) / 65536;
     }
 
@@ -736,73 +797,237 @@ TU_ATTR_FAST_FUNC void tud_audio_feedback_interval_isr(uint8_t func_id, uint32_t
     settingsRegMap[SETTINGS_REG_INFO_AUDIO15] = ((uint32_t) speakerFeedbackMax         << SETTINGS_REG_INFO_AUDIO15_PLAYFBMAX_OFFS) & SETTINGS_REG_INFO_AUDIO15_PLAYFBMAX_MASK;
 }
 
-void ADC1_2_IRQHandler (void)
+/* One recording block, from the half of adcBuf the DMA is not in: COS check, RX equaliser and
+ * volume, then into the USB FIFO */
+static void Microphone_Block(uint32_t half)
 {
-    if ( (ADC1->ISR & ADC_ISR_EOS) || (ADC2->ISR & ADC_ISR_EOS) ) {
-        int16_t sample = 0;
+    uint32_t n = microphoneBlock;
+    int16_t block[AUDIO_BLOCK_MAX];
 
-        /* Get ADC sample */
-        if (ADC1->ISR & ADC_ISR_EOS) {
-            ADC1->ISR = ADC_ISR_EOS;
-            sample = ((int32_t) ADC1->DR - 32768) & 0xFFFFU;
-        }
+    AudioBlock_FromAdc(block, &adcBuf[half * n], n);
 
-        if (ADC2->ISR & ADC_ISR_EOS) {
-            ADC2->ISR = ADC_ISR_EOS;
-            sample = ((int32_t) ADC2->DR - 32768) & 0xFFFFU;
-        }
+    /* Automatic COS */
+    uint16_t cosThreshold = (settingsRegMap[SETTINGS_REG_VCOS_LVLCTRL] & SETTINGS_REG_VCOS_LVLCTRL_THRSHLD_MASK) >> SETTINGS_REG_VCOS_LVLCTRL_THRSHLD_OFFS;
 
-        /* Automatic COS */
-        uint16_t cosThreshold = (settingsRegMap[SETTINGS_REG_VCOS_LVLCTRL] & SETTINGS_REG_VCOS_LVLCTRL_THRSHLD_MASK) >> SETTINGS_REG_VCOS_LVLCTRL_THRSHLD_OFFS;
+    if (!microphoneMute[1] && AudioBlock_Loud(block, n, cosThreshold)) {
+        /* Reset timeout and make sure timer is enabled */
+        TIM17->EGR = TIM_EGR_UG; /* Generate an update event in the timer */
+    }
 
-        if (!microphoneMute[1] && ( (sample > cosThreshold) || (sample < -cosThreshold) )) {
-            /* Reset timeout and make sure timer is enabled */
-            TIM17->EGR = TIM_EGR_UG; /* Generate an update event in the timer */
-        }
+    /* RX equaliser, on the raw samples (COS above has seen them unfiltered) and before the
+     * volume. Switches over with a crossfade when the control register changed, passes the
+     * samples through untouched when bypassed. Its cost is measured on the cycle counter */
+    uint32_t eqStart = DWT->CYCCNT;
+    RxEq_Poll(&rxEq, settingsRegMap[SETTINGS_REG_RXEQ_CTRL], microphoneSampleFreq);
+    RxEq_ProcessBlock(&rxEq, block, n);
 
-        /* Get volume */
-        uint16_t volume = !microphoneMute[1] ? microphoneLinVolume[1] : 0;
+    /* Cycle statistics, and the overload guard: if the equaliser ever leaves the main loop
+     * (which refreshes the watchdog) no time, or runs far over its budget, it switches
+     * itself off. The status registers are written by the main loop (USB_AudioTask) */
+    RxEq_AccountBlock(&rxEq, DWT->CYCCNT - eqStart, n, mainLoopPasses);
 
-        /* Scale with 16-bit unsigned volume and round */
-        sample = (int16_t) (((int32_t) sample * volume + (sample > 0 ? 32768 : -32768)) / 65536);
+    /* Scale with 16-bit unsigned volume and round */
+    AudioBlock_Volume(block, n, !microphoneMute[1] ? microphoneLinVolume[1] : 0);
 
-        /* Store in FIFO */
-        tud_audio_write (&sample, sizeof(sample));
+    /* Store in FIFO */
+    tud_audio_write(block, n * sizeof(int16_t));
+}
+
+static void Microphone_Dma(DMA_TypeDef *dma, DMA_Channel_TypeDef *ch)
+{
+    uint32_t start = DWT->CYCCNT;
+    DIAG_CRUMB(adcTick);
+
+    /* Half transfer or transfer complete: the DMA has moved on to the other half. Take the
+     * one it is not in (from its position, so a late interrupt cannot pick the wrong one) */
+    dma->IFCR = ADC_DMA_IFCR_ALL;
+    Microphone_Block(AudioBlock_FreeHalf(ch->CNDTR, microphoneBlock));
+
+    AudioCycles_Count(&microphoneCycles, DWT->CYCCNT - start, microphoneBlock);
+    settingsRegMap[SETTINGS_REG_INFO_RXCYC] = AudioCycles_Word(&microphoneCycles);
+}
+
+/* An ADC overrun (a result not taken before the next) blocks the ADC's DMA requests until it is
+ * cleared, which would stop recording for good. The DMA takes every result long before the next
+ * conversion, so this should never run; if it does, recording carries on one sample short */
+void ADC1_2_IRQHandler(void)
+{
+    ADC1->ISR = ADC_ISR_OVR;
+    ADC2->ISR = ADC_ISR_OVR;
+}
+
+void DMA1_Channel1_IRQHandler(void)
+{
+    Microphone_Dma(ADC1_DMA, ADC1_DMA_CH);
+}
+
+void DMA2_Channel1_IRQHandler(void)
+{
+    Microphone_Dma(ADC2_DMA, ADC2_DMA_CH);
+}
+
+/* Stop an ADC's conversions, if it is converting, and wait until it has */
+static void ADC_Halt(ADC_TypeDef *adc)
+{
+    if (adc->CR & ADC_CR_ADSTART) {
+        adc->CR |= ADC_CR_ADSTP;
+        for (uint32_t i = 0; (i < 100000) && (adc->CR & ADC_CR_ADSTP); i++)
+            ;
     }
 }
 
-void TIM6_DAC_IRQHandler(void)
+static void Microphone_Start(ADC_TypeDef *adc)
 {
-    if (TIM6->SR & TIM_SR_UIF) {
-        TIM6->SR = (uint32_t) ~TIM_SR_UIF;
-        int16_t sample = 0x0000;
+    DMA_TypeDef *dma = (adc == ADC1) ? ADC1_DMA : ADC2_DMA;
+    DMA_Channel_TypeDef *ch = (adc == ADC1) ? ADC1_DMA_CH : ADC2_DMA_CH;
+    IRQn_Type irq = (adc == ADC1) ? ADC1_DMA_IRQn : ADC2_DMA_IRQn;
 
-        /* Read from FIFO, leave sample at 0 if fifo empty */
-        tud_audio_read(&sample, sizeof(sample));
+    /* Both ADCs and DMAs stopped first, so the DMA starts at the beginning of adcBuf with the
+     * ADC's first conversion, and no interrupt runs while the equaliser is reset */
+    Microphone_Stop();
 
-        /* Automatic PTT */
-        uint16_t pttThreshold = (settingsRegMap[SETTINGS_REG_VPTT_LVLCTRL] & SETTINGS_REG_VPTT_LVLCTRL_THRSHLD_MASK) >> SETTINGS_REG_VPTT_LVLCTRL_THRSHLD_OFFS;
+    /* The block length follows the recording rate */
+    microphoneBlock = AudioBlock_Len(microphoneSampleFreq);
+    AudioCycles_Reset(&microphoneCycles);
 
-        if (!speakerMute[1] && ( (sample > pttThreshold) || (sample < -pttThreshold) )) {
-            /* Reset timeout and make sure timer is enabled */
-            TIM16->EGR = TIM_EGR_UG; /* Generate an update event in the timer */
-        }
+    /* Start the RX equaliser afresh with the profile in the register now */
+    RxEq_Reset(&rxEq, settingsRegMap[SETTINGS_REG_RXEQ_CTRL], microphoneSampleFreq);
 
-        /* Get volume */
-        uint16_t volume = !speakerMute[1] ? speakerLinVolume[1] : 0;
+    /* Peripheral to memory, 16 bit, high priority */
+    ch->CPAR = (uint32_t) &adc->DR;
+    ch->CMAR = (uint32_t) adcBuf;
+    ch->CNDTR = 2 * microphoneBlock;
+    ch->CCR = DMA_CCR_PL_1 | DMA_CCR_MSIZE_0 | DMA_CCR_PSIZE_0 | DMA_CCR_MINC | DMA_CCR_CIRC
+            | DMA_CCR_HTIE | DMA_CCR_TCIE;
+    ch->CCR |= DMA_CCR_EN;
+    dma->IFCR = ADC_DMA_IFCR_ALL;
 
-        /* Scale with 16-bit unsigned volume and round */
-        sample = (int16_t) (((int32_t) sample * volume + (sample > 0 ? 32768 : -32768)) / 65536);
+    NVIC_ClearPendingIRQ(irq);
+    NVIC_EnableIRQ(irq);
 
-        /* TX equaliser. Latches new coefficients when the control register changed, passes the
-         * sample through untouched when bypassed */
-        TxEq_Poll(&txEq, settingsRegMap[SETTINGS_REG_TXEQ_CTRL], &settingsRegMap[SETTINGS_REG_TXEQ_COEF0], speakerSampleFreq);
-        sample = TxEq_Process(&txEq, sample);
-        settingsRegMap[SETTINGS_REG_INFO_TXEQ] = TxEq_Status(&txEq);
+    /* Clear the ADC's flags (an overrun from before would hold off its DMA requests), then
+     * start it: it converts at every TIM3 trigger from now on */
+    adc->ISR = ADC_ISR_OVR | ADC_ISR_EOS | ADC_ISR_EOC | ADC_ISR_EOSMP;
+    NVIC_ClearPendingIRQ(ADC1_2_IRQn);
+    NVIC_EnableIRQ(ADC1_2_IRQn);
+    adc->CR |= ADC_CR_ADSTART;
+}
 
-        /* Load DAC holding register with sample */
-        DAC1->DHR12L1 = ((int32_t) sample + 32768) & 0xFFFFU;
+static void Microphone_Stop(void)
+{
+    NVIC_DisableIRQ(ADC1_DMA_IRQn);
+    NVIC_DisableIRQ(ADC2_DMA_IRQn);
+    NVIC_DisableIRQ(ADC1_2_IRQn);
+
+    ADC_Halt(ADC1);
+    ADC_Halt(ADC2);
+
+    ADC1_DMA_CH->CCR &= ~DMA_CCR_EN;
+    ADC2_DMA_CH->CCR &= ~DMA_CCR_EN;
+    ADC1_DMA->IFCR = ADC_DMA_IFCR_ALL;
+    ADC2_DMA->IFCR = ADC_DMA_IFCR_ALL;
+    NVIC_ClearPendingIRQ(ADC1_DMA_IRQn);
+    NVIC_ClearPendingIRQ(ADC2_DMA_IRQn);
+}
+
+/* One playback block: read it from USB, VPTT check, volume and TX equaliser, then into the
+ * half of dacBuf the DMA is not in */
+static void Speaker_Fill(uint32_t half)
+{
+    uint32_t n = speakerBlock;
+    int16_t block[AUDIO_BLOCK_MAX];
+
+    /* Read from FIFO, leave the rest at 0 if the FIFO runs empty */
+    uint32_t got = tud_audio_read(block, n * sizeof(int16_t));
+    memset((uint8_t *) block + got, 0, n * sizeof(int16_t) - got);
+
+    /* Automatic PTT */
+    uint16_t pttThreshold = (settingsRegMap[SETTINGS_REG_VPTT_LVLCTRL] & SETTINGS_REG_VPTT_LVLCTRL_THRSHLD_MASK) >> SETTINGS_REG_VPTT_LVLCTRL_THRSHLD_OFFS;
+
+    if (!speakerMute[1] && AudioBlock_Loud(block, n, pttThreshold)) {
+        /* Reset timeout and make sure timer is enabled */
+        TIM16->EGR = TIM_EGR_UG; /* Generate an update event in the timer */
     }
+
+    /* Scale with 16-bit unsigned volume and round */
+    AudioBlock_Volume(block, n, !speakerMute[1] ? speakerLinVolume[1] : 0);
+
+    /* TX equaliser. Latches new coefficients when the control register changed, passes the
+     * samples through untouched when bypassed */
+    TxEq_Poll(&txEq, settingsRegMap[SETTINGS_REG_TXEQ_CTRL], &settingsRegMap[SETTINGS_REG_TXEQ_COEF0], speakerSampleFreq);
+    TxEq_ProcessBlock(&txEq, block, n);
+    settingsRegMap[SETTINGS_REG_INFO_TXEQ] = TxEq_Status(&txEq);
+
+    /* Into the DMA buffer */
+    AudioBlock_ToDac(&dacBuf[half * n], block, n);
+    speakerFilled = half;
+}
+
+void DAC_DMA_IRQHandler(void)
+{
+    uint32_t start = DWT->CYCCNT;
+    DIAG_CRUMB(dacTick);
+
+    /* Half transfer or transfer complete: the DMA has moved on to the other half. Fill the
+     * one it is not in (from its position, so a late interrupt cannot pick the wrong one) */
+    DAC_DMA->IFCR = DAC_DMA_IFCR_ALL;
+    Speaker_Fill(AudioBlock_FreeHalf(DAC_DMA_CH->CNDTR, speakerBlock));
+
+    AudioCycles_Count(&speakerCycles, DWT->CYCCNT - start, speakerBlock);
+    settingsRegMap[SETTINGS_REG_INFO_TXCYC] = AudioCycles_Word(&speakerCycles);
+}
+
+static void Speaker_Start(void)
+{
+    /* Stopped first, in case a stream was never closed (a USB reset), so nothing else runs
+     * Speaker_Fill. Both halves next, so the DMA starts on audio, then the DMA, then the
+     * DAC's requests */
+    Speaker_Stop();
+    AudioCycles_Reset(&speakerCycles);
+    Speaker_Fill(0);
+    Speaker_Fill(1);
+
+    DAC_DMA_CH->CCR = 0;
+    DAC_DMA_CH->CPAR = (uint32_t) &DAC1->DHR12L1;
+    DAC_DMA_CH->CMAR = (uint32_t) dacBuf;
+    DAC_DMA_CH->CNDTR = 2 * speakerBlock;
+    /* Memory to peripheral, 16 bit samples into the 32 bit register (zero extended), high priority */
+    DAC_DMA_CH->CCR = DMA_CCR_PL_1 | DMA_CCR_MSIZE_0 | DMA_CCR_PSIZE_1 | DMA_CCR_MINC | DMA_CCR_CIRC | DMA_CCR_DIR
+                    | DMA_CCR_HTIE | DMA_CCR_TCIE;
+    DAC_DMA_CH->CCR |= DMA_CCR_EN;
+
+    NVIC_ClearPendingIRQ(DAC_DMA_IRQn);
+    NVIC_EnableIRQ(DAC_DMA_IRQn);
+    DAC->CR |= DAC_CR_DMAEN1;
+}
+
+static void Speaker_Stop(void)
+{
+    NVIC_DisableIRQ(DAC_DMA_IRQn);
+    DAC->CR &= ~DAC_CR_DMAEN1;
+    DAC_DMA_CH->CCR &= ~DMA_CCR_EN;
+    DAC_DMA->IFCR = DAC_DMA_IFCR_ALL;
+    NVIC_ClearPendingIRQ(DAC_DMA_IRQn);
+
+    /* Output VDD/2 */
+    DAC1->DHR12L1 = 32768;
+}
+
+/* Playback buffered, in bytes: the USB FIFO and what the DMA has still to play. Read together
+ * with interrupts held off, so a block moving from one to the other cannot be missed or
+ * counted twice */
+static uint16_t Speaker_Level(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    uint32_t level = tud_audio_available();
+    if (speakerState == STATE_RUN) {
+        level += AudioBlock_PlayPending(DAC_DMA_CH->CNDTR, speakerBlock, speakerFilled) * CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE;
+    }
+
+    __set_PRIMASK(primask);
+    return (uint16_t) level;
 }
 
 void TIM16_IRQHandler(void)
@@ -860,8 +1085,10 @@ void TIM17_IRQHandler(void)
             /* Update debug register */
             settingsRegMap[SETTINGS_REG_INFO_AUDIO0] |= SETTINGS_REG_INFO_AIOC0_VCOSSTATE_MASK;
 
-            /* Set COS state */
-            COS_VirtualSetState(0x01);
+            /* Set COS state, shown from the main loop (USB_AudioTask): the HID report must not be
+             * sent from an interrupt, which could cut into tinyusb anywhere */
+            cosVirtualState = 0x01;
+            cosVirtualPending = 1;
         }
     } else if (flags & TIM_SR_CC1IF) {
         /* The idle timeout (without any action on the ADC) was reached. Disable timer and notify host */
@@ -870,8 +1097,9 @@ void TIM17_IRQHandler(void)
         /* Update debug register */
         settingsRegMap[SETTINGS_REG_INFO_AUDIO0] &= ~SETTINGS_REG_INFO_AIOC0_VCOSSTATE_MASK;
 
-        /* Set COS state */
-        COS_VirtualSetState(0x00);
+        /* Set COS state, shown from the main loop as above */
+        cosVirtualState = 0x00;
+        cosVirtualPending = 1;
     }
 
     TIM17->SR = ~flags;
@@ -978,10 +1206,8 @@ static void Timer_DAC_Init(void)
     TIM6->ARR = rateDivider - 1;
     TIM6->EGR = TIM_EGR_UG;
 
-    TIM6->DIER = TIM_DIER_UIE;
+    TIM6->DIER = 0; /* Only its trigger: the DMA feeds the DAC */
     TIM6->CR1 |= TIM_CR1_CEN;
-
-    NVIC_SetPriority(TIM6_DAC1_IRQn, AIOC_IRQ_PRIO_AUDIO);
 }
 
 static void ADC_Init(void)
@@ -1015,9 +1241,11 @@ static void ADC_Init(void)
     while (!(ADC1->ISR & ADC_ISR_ADRDY) || !(ADC2->ISR & ADC_ISR_ADRDY) )
         ;
 
-    /* External Trigger on TIM3_TRGO, left aligned data with 12 bit resolution */
-    ADC1->CFGR = (0x01 << ADC_CFGR_EXTEN_Pos)  | (0x04 << ADC_CFGR_EXTSEL_Pos) | (ADC_CFGR_ALIGN) | (0x00 << ADC_CFGR_RES_Pos);
-    ADC2->CFGR = (0x01 << ADC_CFGR_EXTEN_Pos)  | (0x04 << ADC_CFGR_EXTSEL_Pos) | (ADC_CFGR_ALIGN) | (0x00 << ADC_CFGR_RES_Pos);
+    /* External Trigger on TIM3_TRGO, left aligned data with 12 bit resolution, results by DMA, circular */
+    ADC1->CFGR = (0x01 << ADC_CFGR_EXTEN_Pos)  | (0x04 << ADC_CFGR_EXTSEL_Pos) | (ADC_CFGR_ALIGN) | (0x00 << ADC_CFGR_RES_Pos)
+               | ADC_CFGR_DMACFG | ADC_CFGR_DMAEN;
+    ADC2->CFGR = (0x01 << ADC_CFGR_EXTEN_Pos)  | (0x04 << ADC_CFGR_EXTSEL_Pos) | (ADC_CFGR_ALIGN) | (0x00 << ADC_CFGR_RES_Pos)
+               | ADC_CFGR_DMACFG | ADC_CFGR_DMAEN;
 
     /* Maximum sample time of 601.5 cycles for channel 3/channel 12. */
     ADC1->SMPR1 = 0x7 << ADC_SMPR1_SMP3_Pos;
@@ -1027,11 +1255,17 @@ static void ADC_Init(void)
     ADC1->SQR1 = ( 3 << ADC_SQR1_SQ1_Pos) | (0 << ADC_SQR1_L_Pos);
     ADC2->SQR1 = (12 << ADC_SQR1_SQ1_Pos) | (0 << ADC_SQR1_L_Pos);
 
-    /* Enable Interrupt Request */
-    ADC1->IER = ADC_IER_EOSIE;
-    ADC2->IER = ADC_IER_EOSIE;
-
+    /* No ADC interrupts but overrun (ADC1_2_IRQHandler): the DMA's come once per block */
+    ADC1->IER = ADC_IER_OVRIE;
+    ADC2->IER = ADC_IER_OVRIE;
     NVIC_SetPriority(ADC1_2_IRQn, AIOC_IRQ_PRIO_AUDIO);
+
+    /* Recording DMA: ADC1 on DMA1 channel 1, ADC2 on DMA2 channel 1, the default mapping */
+    __HAL_RCC_DMA1_CLK_ENABLE();
+    __HAL_RCC_DMA2_CLK_ENABLE();
+    SYSCFG->CFGR1 &= ~SYSCFG_CFGR1_ADC24_DMA_RMP;
+    NVIC_SetPriority(ADC1_DMA_IRQn, AIOC_IRQ_PRIO_AUDIO);
+    NVIC_SetPriority(ADC2_DMA_IRQn, AIOC_IRQ_PRIO_AUDIO);
 }
 
 static void DAC_Init(void)
@@ -1043,9 +1277,15 @@ static void DAC_Init(void)
 
     /* Output VDD/2 */
     DAC1->DHR12L1 = 32768;
+
+    /* Playback DMA: DAC1 channel 1's request on DMA2 channel 3, the default mapping */
+    __HAL_RCC_DMA2_CLK_ENABLE();
+    SYSCFG->CFGR1 &= ~SYSCFG_CFGR1_TIM6DAC1Ch1_DMA_RMP;
+    NVIC_SetPriority(DAC_DMA_IRQn, AIOC_IRQ_PRIO_AUDIO);
 }
 
-static void RX_Config(usb_audio_rxgain_t rxGain)
+/* Set up the input for the gain, and return the ADC that reads it (Microphone_Start starts it) */
+static ADC_TypeDef *RX_Config(usb_audio_rxgain_t rxGain)
 {
     /* Disable OPAMPs */
     OPAMP1->CSR = 0x00;
@@ -1055,9 +1295,8 @@ static void RX_Config(usb_audio_rxgain_t rxGain)
         /* Legacy mode that is compatible with pre-v1.2 hardware */
         OPAMP2->CSR = OPAMP_FOLLOWER_MODE | OPAMP_VREF_50VDDA | OPAMP_CSR_FORCEVP | OPAMP2_CSR_OPAMP2EN; /* 50% VDD for bias */
 
-        /* Start ADC2 with direct hardware ADC input (no PGA in between) */
-        if (ADC1->CR & ADC_CR_ADSTART)      ADC1->CR |= ADC_CR_ADSTP;
-        if (!(ADC2->CR & ADC_CR_ADSTART))   ADC2->CR |= ADC_CR_ADSTART;
+        /* ADC2 with direct hardware ADC input (no PGA in between) */
+        return ADC2;
     } else {
         /* Initialize OPAMPs so that OPAMP1 is a PGA (non inverting) and OPAMP2 produces the correct DC-bias voltage according to OPAMP1 gain. */
         static const uint32_t pgaConfig[] = {
@@ -1096,9 +1335,8 @@ static void RX_Config(usb_audio_rxgain_t rxGain)
                 ((trimmingOffsetP2 << OPAMP2_CSR_TRIMOFFSETP_Pos) & OPAMP2_CSR_TRIMOFFSETP_Msk) |
                 ((trimmingOffsetN2 << OPAMP2_CSR_TRIMOFFSETN_Pos) & OPAMP2_CSR_TRIMOFFSETN_Msk);
 
-        /* Start ADC1 using PGA output as ADC input */
-        if (ADC2->CR & ADC_CR_ADSTART)      ADC2->CR |= ADC_CR_ADSTP;
-        if (!(ADC1->CR & ADC_CR_ADSTART))   ADC1->CR |= ADC_CR_ADSTART;
+        /* ADC1 using PGA output as ADC input */
+        return ADC1;
     }
 }
 
@@ -1141,6 +1379,12 @@ static void Timeout_Timers_Init(void)
 
 void USB_AudioInit(void)
 {
+    /* Cycle counter, for the RX equaliser's cost (SETTINGS_REG_INFO_RXEQCYC) and the block
+     * interrupts' (SETTINGS_REG_INFO_RXCYC, SETTINGS_REG_INFO_TXCYC) */
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
     GPIO_Init();
     Timer_ADC_Init();
     Timer_DAC_Init();
@@ -1148,6 +1392,23 @@ void USB_AudioInit(void)
     DAC_Init();
 
     Timeout_Timers_Init();
+}
+
+void USB_AudioTask(void)
+{
+    /* Virtual COS changes from the TIM17 interrupt. Cleared before the state is read, so a
+     * change in between is shown now and again on the next pass, never lost; two changes
+     * between passes (far shorter than any COS timeout) show as the last one */
+    if (cosVirtualPending) {
+        cosVirtualPending = 0;
+        COS_VirtualSetState(cosVirtualState);
+    }
+
+    /* RX equaliser status, from the main loop rather than at every block, to keep the
+     * recording interrupt short. A read racing the interrupt can mix two blocks' values;
+     * harmless here */
+    settingsRegMap[SETTINGS_REG_INFO_RXEQ] = RxEq_Status(&rxEq);
+    settingsRegMap[SETTINGS_REG_INFO_RXEQCYC] = RxEq_Cycles(&rxEq);
 }
 
 void USB_AudioGetSpeakerFeedbackStats(usb_audio_fbstats_t * status)

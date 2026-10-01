@@ -115,8 +115,14 @@ LoopForever:
 */
     .section	.text.Default_Handler,"ax",%progbits
 Default_Handler:
-Infinite_Loop:
-	b	Infinite_Loop
+/* aioc-packet: record the unexpected interrupt for the reset diagnostics (main.c), which then
+ * spins as this did */
+	tst	lr, #4
+	ite	eq
+	mrseq	r0, msp
+	mrsne	r0, psp
+	mov	r1, lr
+	b	Diag_FaultEntry
 	.size	Default_Handler, .-Default_Handler
 /******************************************************************************
 *
