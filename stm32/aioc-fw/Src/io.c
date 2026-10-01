@@ -12,6 +12,10 @@ void IO_IN_EXTI_ISR(void)
     /* Note the change only. The HID reports go out from the main loop (IO_Task): tinyusb is
      * not re-entrant, and this interrupt can cut into the main loop's USB task anywhere */
     uint32_t pr = EXTI->PR & (IO_IN_PIN_1_EXTI_PR | IO_IN_PIN_2_EXTI_PR);
+
+    /* Clear the flags seen first, then read the pins: an edge after this read sets its flag
+     * again and comes back as a new interrupt, never lost */
+    EXTI->PR = pr;
     uint32_t idr = IO_IN_GPIO->IDR;
     uint8_t state = inState;
     uint8_t pending = inPending;
@@ -28,9 +32,6 @@ void IO_IN_EXTI_ISR(void)
 
     inState = state;
     inPending = pending;
-
-    /* Clear the flags seen (an edge after the read above comes back as a new interrupt) */
-    EXTI->PR = pr;
 }
 
 void IO_Task(void)

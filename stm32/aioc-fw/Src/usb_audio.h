@@ -32,6 +32,8 @@ void USB_AudioInit(void);
 /* Main loop: show virtual COS changes (HID reports go from here, not from the interrupt), and
  * copy the RX equaliser's status into its settings registers */
 void USB_AudioTask(void);
+/* USB (re)configured or unconfigured (tud_mount_cb, tud_umount_cb): stop both streams */
+void USB_AudioReset(void);
 void USB_AudioGetSpeakerFeedbackStats(usb_audio_fbstats_t * status);
 void USB_AudioGetSpeakerBufferStats(usb_audio_bufstats_t * status);
 

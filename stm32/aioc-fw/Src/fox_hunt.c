@@ -155,8 +155,11 @@ void TIM15_IRQHandler(void)
         /* Scale with 16-bit unsigned volume and round */
         sample = (int16_t) (((int32_t) sample * volume + (sample > 0 ? 32768 : -32768)) / 65536);
 
-        /* Load DAC holding register with sample */
-        DAC1->DHR12L1 = ((int32_t) sample + 32768) & 0xFFFFU;
+        /* Load DAC holding register with sample, unless host playback has the DAC (its DMA
+         * feeds it then, triggered by TIM6; usb_audio.c gives it back when playback stops) */
+        if (!(DAC->CR & DAC_CR_DMAEN1)) {
+            DAC1->DHR12L1 = ((int32_t) sample + 32768) & 0xFFFFU;
+        }
 
     }
 }
