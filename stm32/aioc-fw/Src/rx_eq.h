@@ -89,7 +89,7 @@
 #define RXEQ_STATUS_ACTIVE_MASK     0x00000100UL
 #define RXEQ_STATUS_FADE_MASK       0x00000200UL
 #define RXEQ_STATUS_OVERLOAD_MASK   0x00000400UL    /* switched off by the guard, until recording restarts */
-#define RXEQ_STATUS_OVERLOADS_OFFS  11              /* times the guard tripped since power-up, sticks at 31 */
+#define RXEQ_STATUS_OVERLOADS_OFFS  11              /* times the guard tripped since the last reset, sticks at 31 */
 #define RXEQ_STATUS_OVERLOADS_MASK  0x0000F800UL
 #define RXEQ_STATUS_CLIPS_OFFS      16
 

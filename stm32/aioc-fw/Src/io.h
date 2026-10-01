@@ -34,7 +34,7 @@ static inline void IO_PTTAssert(uint8_t pttMask)
         LED_SET(1, 1);
 
         /* Update debug register */
-        settingsRegMap[SETTINGS_REG_INFO_AUDIO0] |= SETTINGS_REG_INFO_AIOC0_PTT1STATE_MASK;
+        settingsRegMap[SETTINGS_REG_INFO_AIOC0] |= SETTINGS_REG_INFO_AIOC0_PTT1STATE_MASK;
     }
 
     if (pttMask & IO_PTT_MASK_PTT2) {
@@ -42,7 +42,7 @@ static inline void IO_PTTAssert(uint8_t pttMask)
         LED_SET(0, 1);
 
         /* Update debug register */
-        settingsRegMap[SETTINGS_REG_INFO_AUDIO0] |= SETTINGS_REG_INFO_AIOC0_PTT2STATE_MASK;
+        settingsRegMap[SETTINGS_REG_INFO_AIOC0] |= SETTINGS_REG_INFO_AIOC0_PTT2STATE_MASK;
     }
 
     __enable_irq();
@@ -57,7 +57,7 @@ static inline void IO_PTTDeassert(uint8_t pttMask)
         LED_SET(1, 0);
 
         /* Update debug register */
-        settingsRegMap[SETTINGS_REG_INFO_AUDIO0] &= ~SETTINGS_REG_INFO_AIOC0_PTT1STATE_MASK;
+        settingsRegMap[SETTINGS_REG_INFO_AIOC0] &= ~SETTINGS_REG_INFO_AIOC0_PTT1STATE_MASK;
     }
 
     if (pttMask & IO_PTT_MASK_PTT2) {
@@ -65,7 +65,7 @@ static inline void IO_PTTDeassert(uint8_t pttMask)
         LED_SET(0, 0);
 
         /* Update debug register */
-        settingsRegMap[SETTINGS_REG_INFO_AUDIO0] &= ~SETTINGS_REG_INFO_AIOC0_PTT2STATE_MASK;
+        settingsRegMap[SETTINGS_REG_INFO_AIOC0] &= ~SETTINGS_REG_INFO_AIOC0_PTT2STATE_MASK;
     }
 
     __enable_irq();

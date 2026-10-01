@@ -33,16 +33,17 @@ void USBWakeUp_RMP_IRQHandler(void)
   tud_int_handler(0);
 }
 
-// Invoked when device is mounted (configured)
+// Invoked when device is mounted (configured). After a bus reset (a host reboot, a port reset)
+// this comes before any stream starts again, and no stream was closed: stop them
 void tud_mount_cb(void)
 {
-
+    USB_AudioReset();
 }
 
 // Invoked when device is unmounted
 void tud_umount_cb(void)
 {
-
+    USB_AudioReset();
 }
 
 // Invoked when usb bus is suspended

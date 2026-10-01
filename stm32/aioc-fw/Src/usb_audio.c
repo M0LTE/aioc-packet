@@ -91,6 +91,8 @@ static uint16_t dacBuf[2 * AUDIO_BLOCK_MAX]; /* Playback DMA buffer, two halves 
 static uint32_t speakerBlock = AUDIO_BLOCK_MAX; /* Samples per block, set at playback start */
 static uint32_t speakerLevelTarget = SPEAKER_BUFFERLVL_TARGET + 2 * AUDIO_BLOCK_MAX; /* Bytes, see SPEAKER_BUFFERLVL_TARGET */
 static volatile uint8_t speakerFilled; /* Half of dacBuf filled most recently */
+static uint8_t speakerOwnsDac; /* Playback has the DAC (DMA on, trigger TIM6) ... */
+static uint32_t speakerOtherTsel; /* ... and this was its trigger before (TIM15 with the fox hunt on) */
 static audio_cycles_t speakerCycles; /* Cycles per playback block */
 static uint16_t adcBuf[2 * AUDIO_BLOCK_MAX]; /* Recording DMA buffer, two halves of microphoneBlock samples */
 static uint32_t microphoneBlock = AUDIO_BLOCK_MAX; /* Samples per block, set at recording start */
@@ -655,7 +657,9 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const * p_reque
     switch(itf) {
     case ITF_NUM_AUDIO_STREAMING_IN:
         if (alt == 1) {
-            /* Microphone channel has been activated */
+            /* Microphone channel has been activated. Stop whatever runs first: after a USB
+             * bus reset the old stream was never closed */
+            Microphone_Stop();
             microphoneState = STATE_START;
 
             /* Update VCOS/VPTT timeouts */
@@ -669,7 +673,10 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const * p_reque
 
     case ITF_NUM_AUDIO_STREAMING_OUT:
         if (alt == 1) {
-            /* Speaker channel has been activated */
+            /* Speaker channel has been activated. Stop whatever runs first, as above: a
+             * playback DMA left running would drain the FIFO, so the new stream would never
+             * reach its start level */
+            Speaker_Stop();
             speakerState = STATE_START;
 
             /* Update VCOS/VPTT timeouts */
@@ -977,6 +984,22 @@ void DAC_DMA_IRQHandler(void)
     settingsRegMap[SETTINGS_REG_INFO_TXCYC] = AudioCycles_Word(&speakerCycles);
 }
 
+/* A DAC DMA underrun (a trigger before the DMA served the last one) stops the DAC's DMA
+ * requests for good, and playback would hold one value. The DMA serves every request long
+ * before the next trigger, so this should never run; if it does, playback restarts from two
+ * fresh blocks (the TX equaliser carries on). TIM6's own update interrupt is off */
+void TIM6_DAC_IRQHandler(void)
+{
+    if (DAC->SR & DAC_SR_DMAUDR1) {
+        DAC->SR = DAC_SR_DMAUDR1;
+        if (speakerState == STATE_RUN) {
+            Speaker_Start();
+        } else {
+            Speaker_Stop();
+        }
+    }
+}
+
 static void Speaker_Start(void)
 {
     /* Stopped first, in case a stream was never closed (a USB reset), so nothing else runs
@@ -998,13 +1021,25 @@ static void Speaker_Start(void)
 
     NVIC_ClearPendingIRQ(DAC_DMA_IRQn);
     NVIC_EnableIRQ(DAC_DMA_IRQn);
-    DAC->CR |= DAC_CR_DMAEN1;
+
+    /* The DAC: triggered by TIM6, at the playback rate (the fox hunt sets TIM15, which
+     * Speaker_Stop gives back), a stale underrun cleared, then its DMA requests, and an
+     * interrupt if one is ever missed (TIM6_DAC_IRQHandler) */
+    speakerOtherTsel = DAC->CR & DAC_CR_TSEL1;
+    speakerOwnsDac = 1;
+    DAC->SR = DAC_SR_DMAUDR1;
+    DAC->CR = (DAC->CR & ~DAC_CR_TSEL1) | DAC_CR_DMAEN1 | DAC_CR_DMAUDRIE1;
 }
 
 static void Speaker_Stop(void)
 {
     NVIC_DisableIRQ(DAC_DMA_IRQn);
-    DAC->CR &= ~DAC_CR_DMAEN1;
+    DAC->CR &= ~(DAC_CR_DMAEN1 | DAC_CR_DMAUDRIE1);
+    if (speakerOwnsDac) {
+        /* Give the DAC its trigger back */
+        DAC->CR = (DAC->CR & ~DAC_CR_TSEL1) | speakerOtherTsel;
+        speakerOwnsDac = 0;
+    }
     DAC_DMA_CH->CCR &= ~DMA_CCR_EN;
     DAC_DMA->IFCR = DAC_DMA_IFCR_ALL;
     NVIC_ClearPendingIRQ(DAC_DMA_IRQn);
@@ -1043,7 +1078,7 @@ void TIM16_IRQHandler(void)
             TIM16->CR1 = cr | TIM_CR1_CEN;
 
             /* Update debug register */
-            settingsRegMap[SETTINGS_REG_INFO_AUDIO0] |= SETTINGS_REG_INFO_AIOC0_VPTTSTATE_MASK;
+            settingsRegMap[SETTINGS_REG_INFO_AIOC0] |= SETTINGS_REG_INFO_AIOC0_VPTTSTATE_MASK;
 
             /* Assert enabled PTTs */
             uint8_t pttMask = IO_PTT_MASK_NONE;
@@ -1057,7 +1092,7 @@ void TIM16_IRQHandler(void)
         TIM16->CR1 &= ~TIM_CR1_CEN;
 
         /* Update debug register */
-        settingsRegMap[SETTINGS_REG_INFO_AUDIO0] &= ~SETTINGS_REG_INFO_AIOC0_VPTTSTATE_MASK;
+        settingsRegMap[SETTINGS_REG_INFO_AIOC0] &= ~SETTINGS_REG_INFO_AIOC0_VPTTSTATE_MASK;
 
         /* Deassert enabled PTTs */
         uint8_t pttMask = IO_PTT_MASK_NONE;
@@ -1083,7 +1118,7 @@ void TIM17_IRQHandler(void)
             TIM17->CR1 = cr | TIM_CR1_CEN;
 
             /* Update debug register */
-            settingsRegMap[SETTINGS_REG_INFO_AUDIO0] |= SETTINGS_REG_INFO_AIOC0_VCOSSTATE_MASK;
+            settingsRegMap[SETTINGS_REG_INFO_AIOC0] |= SETTINGS_REG_INFO_AIOC0_VCOSSTATE_MASK;
 
             /* Set COS state, shown from the main loop (USB_AudioTask): the HID report must not be
              * sent from an interrupt, which could cut into tinyusb anywhere */
@@ -1095,7 +1130,7 @@ void TIM17_IRQHandler(void)
         TIM17->CR1 &= ~TIM_CR1_CEN;
 
         /* Update debug register */
-        settingsRegMap[SETTINGS_REG_INFO_AUDIO0] &= ~SETTINGS_REG_INFO_AIOC0_VCOSSTATE_MASK;
+        settingsRegMap[SETTINGS_REG_INFO_AIOC0] &= ~SETTINGS_REG_INFO_AIOC0_VCOSSTATE_MASK;
 
         /* Set COS state, shown from the main loop as above */
         cosVirtualState = 0x00;
@@ -1282,6 +1317,11 @@ static void DAC_Init(void)
     __HAL_RCC_DMA2_CLK_ENABLE();
     SYSCFG->CFGR1 &= ~SYSCFG_CFGR1_TIM6DAC1Ch1_DMA_RMP;
     NVIC_SetPriority(DAC_DMA_IRQn, AIOC_IRQ_PRIO_AUDIO);
+
+    /* The DAC's DMA underrun interrupt (enabled with playback) */
+    NVIC_SetPriority(TIM6_DAC1_IRQn, AIOC_IRQ_PRIO_AUDIO);
+    NVIC_ClearPendingIRQ(TIM6_DAC1_IRQn);
+    NVIC_EnableIRQ(TIM6_DAC1_IRQn);
 }
 
 /* Set up the input for the gain, and return the ADC that reads it (Microphone_Start starts it) */
@@ -1392,6 +1432,19 @@ void USB_AudioInit(void)
     DAC_Init();
 
     Timeout_Timers_Init();
+}
+
+void USB_AudioReset(void)
+{
+    /* No stream survives a USB bus reset or a new configuration, but tinyusb does not close
+     * them (no close callback), so stop both here: a new stream then starts from scratch */
+    Microphone_Stop();
+    microphoneState = STATE_OFF;
+    Speaker_Stop();
+    speakerState = STATE_OFF;
+
+    /* Update debug register */
+    settingsRegMap[SETTINGS_REG_INFO_AUDIO0] &= ~(SETTINGS_REG_INFO_AUDIO0_RECSTATE_MASK | SETTINGS_REG_INFO_AUDIO0_PLAYSTATE_MASK);
 }
 
 void USB_AudioTask(void)

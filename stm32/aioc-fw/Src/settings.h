@@ -301,9 +301,9 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
  * (ADC -> USB IN) path, applied after the virtual COS level check and before the volume:
  * 0 = off, the samples pass through untouched as in v1.4.1; 1 = the built-in UV-K5 profile,
  * which undoes the K5's receive high-pass (about 128 Hz, second order) in magnitude and phase
- * so that 9600 baud FSK decodes, at the cost of 368 samples (7.67 ms) of extra delay. Any
+ * so that 9600 baud FSK decodes, at the cost of 336 samples (7.0 ms) of extra delay. Any
  * other value is reserved and bypasses. Runs only while the host records at 48000 Hz. A
- * change takes effect at the next sample: switching on, the filter first runs unheard for
+ * change takes effect at the next 1 ms block: switching on, the filter first runs unheard for
  * 1024 samples to fill its delay lines, then both switching on and off crossfade over 512
  * samples. Unused in v1.4.1 and every upstream branch, so a page stored by them (or by an
  * aioc-packet without the RX equaliser) holds 0 here; see SETTINGS_REG_INFO_RXEQPAGE. */
@@ -370,9 +370,13 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
 /* AIOC debug register 0 */
 #define SETTINGS_REG_INFO_AIOC0                             0xC0
 #define SETTINGS_REG_INFO_AIOC0_DEFAULT                     0
-/* Various digital signal states */
+/* Various digital signal states: the PTT outputs, virtual PTT and virtual COS. (Upstream
+ * writes these into SETTINGS_REG_INFO_AUDIO0 instead, over its record mute bits and its
+ * record and play state fields; this firmware writes them here) */
 #define SETTINGS_REG_INFO_AIOC0_PTT1STATE_MASK              0x00010000UL
 #define SETTINGS_REG_INFO_AIOC0_PTT2STATE_MASK              0x00020000UL
+#define SETTINGS_REG_INFO_AIOC0_VPTTSTATE_MASK              0x01000000UL
+#define SETTINGS_REG_INFO_AIOC0_VCOSSTATE_MASK              0x10000000UL
 
 /* TX equaliser status register (read only) */
 #define SETTINGS_REG_INFO_TXEQ                              0xC8
@@ -414,9 +418,9 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
 #define SETTINGS_REG_INFO_RXEQ_ACTIVE_MASK                  0x00000100UL
 #define SETTINGS_REG_INFO_RXEQ_FADE_MASK                    0x00000200UL
 /* The overload guard switched the equaliser off (bit 10, until recording restarts), and how
- * many times it has done so since power-up (bits 11-15, sticks at 31). It trips when the
- * main loop gets no CPU time for 50 ms while the equaliser runs, or the equaliser takes over
- * 600 cycles per sample for 1 ms */
+ * many times it has done so since the AIOC last started, at power-up or any reset (bits
+ * 11-15, sticks at 31). It trips when the main loop gets no CPU time for 50 ms while the
+ * equaliser runs, or the equaliser takes over 600 cycles per sample for 1 ms */
 #define SETTINGS_REG_INFO_RXEQ_OVERLOAD_MASK                0x00000400UL
 #define SETTINGS_REG_INFO_RXEQ_OVERLOADS_OFFS               11
 #define SETTINGS_REG_INFO_RXEQ_OVERLOADS_MASK               0x0000F800UL
@@ -534,10 +538,6 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
 #define SETTINGS_REG_INFO_AUDIO0_RECMUTE1_MASK              0x00020000UL
 #define SETTINGS_REG_INFO_AUDIO0_PLAYMUTE0_MASK             0x00100000UL
 #define SETTINGS_REG_INFO_AUDIO0_PLAYMUTE1_MASK             0x00200000UL
-/* Virtual PTT and COS states */
-#define SETTINGS_REG_INFO_AIOC0_VPTTSTATE_MASK              0x01000000UL
-#define SETTINGS_REG_INFO_AIOC0_VCOSSTATE_MASK              0x10000000UL
-
 /* Playback and recording state */
 #define SETTINGS_REG_INFO_AUDIO0_RECSTATE_OFFS              24
 #define SETTINGS_REG_INFO_AUDIO0_RECSTATE_MASK              0x0F000000UL
