@@ -22,6 +22,9 @@
 #define IO_IN_PIN_2_EXTI_PR     EXTI_PR_PR7
 #define IO_IN_IRQN              EXTI9_5_IRQn
 
+/* Main loop: show input changes the EXTI interrupt noted (CM108 buttons and serial lines) */
+void IO_Task(void);
+
 static inline void IO_PTTAssert(uint8_t pttMask)
 {
     __disable_irq();

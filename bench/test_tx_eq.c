@@ -443,6 +443,99 @@ static void TestEnableDisable(void)
     CHECK(g1.peak <= steady.peak + 8 && g2.peak <= steady.peak + 8, "overshoot when switching");
 }
 
+/* The firmware runs the equaliser on blocks (TxEq_Poll once, then TxEq_ProcessBlock); the
+ * output must be bit for bit that of running it sample by sample, through bypass, a set, a
+ * change of set (and one committed while that is still settling, which waits), saturation,
+ * switching off and on again, in blocks of the firmware's sizes and others (100 is more than
+ * TxEq_ProcessBlock takes in one piece). Each change lands on a block boundary, and the
+ * reference polls at the start of each block as the firmware does: a commit that waits for a
+ * change in progress starts at the next poll */
+static int16_t blkIn[LEN], blkRef[LEN], blkOut[LEN];
+
+/* Two sections of gain 4 (no feedback): saturates inside, in the second section */
+static const int32_t HOT[TXEQ_NUM_COEFS] = { 0x7FFFFFFF, 0, 0, 0, 0, 0x7FFFFFFF, 0, 0, 0, 0 };
+
+static void Scenario(regs_t *r, long n, long b, const int32_t *B)
+{
+    /* Change times rounded down to whole blocks */
+    const long t[] = { FS / 4, FS / 2 + 1001, FS + 333, FS + FS / 2 + 7, 2 * FS + 5, FS / 4 + 2000,
+                       2 * FS + FS / 2 };
+    if (n == t[0] / b * b) { SetCoefs(r, B, TXEQ_NUM_COEFS); r->ctrl = Ctrl(3, 6, FS); }
+    if (n == t[5] / b * b) { SetCoefs(r, PROPOSAL, TXEQ_NUM_COEFS); r->ctrl = Ctrl(3, 1, FS); }
+    if (n == t[1] / b * b) { SetCoefs(r, B, TXEQ_NUM_COEFS); r->ctrl = Ctrl(3, 2, FS); }
+    if (n == t[2] / b * b) r->ctrl = Ctrl(0, 3, FS);
+    if (n == t[3] / b * b) { SetCoefs(r, PROPOSAL, TXEQ_NUM_COEFS); r->ctrl = Ctrl(2, 4, FS); }
+    if (n == t[4] / b * b) r->ctrl = Ctrl(3, 5, FS);
+    if (n == t[6] / b * b) { SetCoefs(r, HOT, TXEQ_NUM_COEFS); r->ctrl = Ctrl(2, 7, FS); }
+}
+
+static void TestBlocks(void)
+{
+    printf("block processing is bit-exact with sample by sample\n");
+    int32_t B[TXEQ_NUM_COEFS];
+    Peak(&B[0], 100, -8, 0.7, 0.5);
+    Peak(&B[5], 4000, 12, 0.8, 1.0);
+    Peak(&B[10], 800, -2, 1.0, 1.0);
+
+    /* Tones and noise, with a loud 4 kHz stretch that saturates B's boost there */
+    for (long n = 0; n < LEN; n++) {
+        double v = 0.3 * sin(2 * PI * 1200.0 * n / FS) + 0.2 * sin(2 * PI * 97.0 * n / FS)
+                 + 0.1 * ((double) (Rand() & 0xFFFF) / 32768.0 - 1.0);
+        if (n > FS / 2 + 6000 && n < FS / 2 + 12000) v = 0.9 * sin(2 * PI * 4000.0 * n / FS);
+        long q = lround(v * 32767);
+        blkIn[n] = (int16_t) (q > 32767 ? 32767 : (q < -32768 ? -32768 : q));
+    }
+
+    static const long sizes[] = { 48, 1, 2, 7, 13, 22, 32, 47, 49, 100 };
+    for (unsigned k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+        long b = sizes[k];
+        txeq_t ref, blk;
+        regs_t rr, rb;
+        memset(&rr, 0, sizeof(rr));
+        memset(&rb, 0, sizeof(rb));
+        Start(&ref, &rr, FS);
+        Start(&blk, &rb, FS);
+
+        long len = LEN / b * b, diff = 0, statusDiff = 0;
+        for (long n = 0; n < len; n++) {
+            Scenario(&rr, n, b, B);
+            if (n % b == 0) TxEq_Poll(&ref, rr.ctrl, rr.coef, FS);
+            blkRef[n] = TxEq_Process(&ref, blkIn[n]);
+        }
+        for (long n = 0; n < len; n += b) {
+            Scenario(&rb, n, b, B);
+            memcpy(&blkOut[n], &blkIn[n], b * sizeof(int16_t));
+            TxEq_Poll(&blk, rb.ctrl, rb.coef, FS);
+            TxEq_ProcessBlock(&blk, &blkOut[n], (uint32_t) b);
+        }
+        for (long n = 0; n < len; n++) if (blkOut[n] != blkRef[n]) diff++;
+        if (TxEq_Status(&blk) != TxEq_Status(&ref)) statusDiff++;
+        /* And the whole internal state, down to the rounding remainders far below an output LSB */
+        if (memcmp(&blk, &ref, sizeof(blk)) != 0) statusDiff++;
+        printf("  blocks of %2ld: %ld of %ld samples differ, status 0x%08X%s\n", b, diff, len,
+               TxEq_Status(&blk), statusDiff ? " (status or state differs)" : ", same state");
+        CHECK(diff == 0 && statusDiff == 0, "blocks of %ld are not bit-exact", b);
+    }
+
+    /* The scenario really did saturate (inside B, before it was switched off) */
+    {
+        txeq_t eq;
+        regs_t r; memset(&r, 0, sizeof(r));
+        Start(&eq, &r, FS);
+        uint32_t maxClips = 0;
+        for (long n = 0; n < LEN; n++) {
+            Scenario(&r, n, 48, B);
+            Step(&eq, &r, FS, blkIn[n]);
+            uint32_t c = TxEq_Status(&eq) >> TXEQ_STATUS_CLIPS_OFFS;
+            if (c > maxClips) maxClips = c;
+        }
+        uint32_t hotClips = TxEq_Status(&eq) >> TXEQ_STATUS_CLIPS_OFFS;
+        printf("  (the scenario clipped %u samples at most between changes, %u in the hot set)\n", maxClips, hotClips);
+        CHECK(maxClips > 0, "the scenario does not exercise saturation");
+        CHECK(hotClips > 1000, "the hot set does not saturate");
+    }
+}
+
 int main(void)
 {
     TestBypass();
@@ -451,6 +544,7 @@ int main(void)
     TestLimitCycles();
     TestLiveUpdate();
     TestEnableDisable();
+    TestBlocks();
     printf(failures ? "\n%d FAILED\n" : "\nall tests passed\n", failures);
     return failures ? 1 : 0;
 }

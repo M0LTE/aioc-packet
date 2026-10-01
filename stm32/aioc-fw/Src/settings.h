@@ -297,6 +297,31 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
 #define SETTINGS_REG_FOXHUNT_MSG3_CHAR15_OFFS               24
 #define SETTINGS_REG_FOXHUNT_MSG3_CHAR15_MASK               0xFF000000UL
 
+/* RX equaliser control register (see bench/EQ.md). Picks the equaliser in the recording
+ * (ADC -> USB IN) path, applied after the virtual COS level check and before the volume:
+ * 0 = off, the samples pass through untouched as in v1.4.1; 1 = the built-in UV-K5 profile,
+ * which undoes the K5's receive high-pass (about 128 Hz, second order) in magnitude and phase
+ * so that 9600 baud FSK decodes, at the cost of 368 samples (7.67 ms) of extra delay. Any
+ * other value is reserved and bypasses. Runs only while the host records at 48000 Hz. A
+ * change takes effect at the next sample: switching on, the filter first runs unheard for
+ * 1024 samples to fill its delay lines, then both switching on and off crossfade over 512
+ * samples. Unused in v1.4.1 and every upstream branch, so a page stored by them (or by an
+ * aioc-packet without the RX equaliser) holds 0 here; see SETTINGS_REG_INFO_RXEQPAGE. */
+#define SETTINGS_REG_RXEQ_CTRL                              0xAF
+#ifndef TXEQ_DEFAULT_OFF
+/* Default: the UV-K5 profile, on. Used when nothing is stored, for a page stored by firmware
+ * without the RX equaliser, and on a "load defaults" request */
+#define SETTINGS_REG_RXEQ_CTRL_DEFAULT                      (SETTINGS_REG_RXEQ_CTRL_PROFILE_K5_ENUM << SETTINGS_REG_RXEQ_CTRL_PROFILE_OFFS)
+#else
+/* Developer build option (make TXEQ_DEFAULT=off): both equalisers default to off */
+#define SETTINGS_REG_RXEQ_CTRL_DEFAULT                      (SETTINGS_REG_RXEQ_CTRL_PROFILE_OFF_ENUM << SETTINGS_REG_RXEQ_CTRL_PROFILE_OFFS)
+#endif
+/* PROFILE: the whole word. Values other than the ones below are reserved (bypass) */
+#define SETTINGS_REG_RXEQ_CTRL_PROFILE_OFFS                 0
+#define SETTINGS_REG_RXEQ_CTRL_PROFILE_MASK                 0xFFFFFFFFUL
+#define SETTINGS_REG_RXEQ_CTRL_PROFILE_OFF_ENUM             0x0UL
+#define SETTINGS_REG_RXEQ_CTRL_PROFILE_K5_ENUM              0x1UL
+
 /* TX equaliser coefficients (packet-eq branch, see bench/EQ.md).
  * Biquad cascade in the playback (USB OUT -> DAC) path. Section k (0..2) at 0xB0 + 5*k holds
  * b0, b1, b2, a1, a2, each signed 32 bit Q3.29 (1.0 = 0x20000000), for
@@ -354,7 +379,7 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
 #define SETTINGS_REG_INFO_TXEQ_DEFAULT                      0
 /* Sections in use, filter running (NSECT > 0 and sample rate matches), a change is settling or
  * crossfading, GEN of the set in use, and the number of saturation events since the last commit
- * (sticks at 0xFFFF). Updated at every DAC sample, so only while playback is running */
+ * (sticks at 0xFFFF). Updated at every playback block (1 ms), so only while playback is running */
 #define SETTINGS_REG_INFO_TXEQ_NSECT_OFFS                   0
 #define SETTINGS_REG_INFO_TXEQ_NSECT_MASK                   0x00000003UL
 #define SETTINGS_REG_INFO_TXEQ_ACTIVE_MASK                  0x00000004UL
@@ -375,6 +400,131 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
                                                               (((uint32_t) 'X') <<  8) | \
                                                               (((uint32_t) 'E') << 16) | \
                                                               (((uint32_t) 'Q') << 24) )
+
+/* RX equaliser status register (read only) */
+#define SETTINGS_REG_INFO_RXEQ                              0xCA
+#define SETTINGS_REG_INFO_RXEQ_DEFAULT                      0
+/* Profile in use (0 while off or at another sample rate), filter running (it is heard: a
+ * profile is in use, so recording runs at 48000 Hz), a change is settling or crossfading,
+ * and the number of output samples saturated to int16 since recording started or the last
+ * change (sticks at 0xFFFF). Copied from the equaliser by the main loop; it keeps the last
+ * recording's values while nothing records */
+#define SETTINGS_REG_INFO_RXEQ_PROFILE_OFFS                 0
+#define SETTINGS_REG_INFO_RXEQ_PROFILE_MASK                 0x000000FFUL
+#define SETTINGS_REG_INFO_RXEQ_ACTIVE_MASK                  0x00000100UL
+#define SETTINGS_REG_INFO_RXEQ_FADE_MASK                    0x00000200UL
+/* The overload guard switched the equaliser off (bit 10, until recording restarts), and how
+ * many times it has done so since power-up (bits 11-15, sticks at 31). It trips when the
+ * main loop gets no CPU time for 50 ms while the equaliser runs, or the equaliser takes over
+ * 600 cycles per sample for 1 ms */
+#define SETTINGS_REG_INFO_RXEQ_OVERLOAD_MASK                0x00000400UL
+#define SETTINGS_REG_INFO_RXEQ_OVERLOADS_OFFS               11
+#define SETTINGS_REG_INFO_RXEQ_OVERLOADS_MASK               0x0000F800UL
+#define SETTINGS_REG_INFO_RXEQ_CLIPS_OFFS                   16
+#define SETTINGS_REG_INFO_RXEQ_CLIPS_MASK                   0xFFFF0000UL
+
+/* RX equaliser settings page marker (read only). Always "RXEQ" in RAM on this firmware, so
+ * every settings page it stores carries it; earlier firmware (stock, and aioc-packet up to
+ * v1.4.1-packet.2) leaves this address zero. On recall, RXEQ_CTRL comes from the stored page
+ * only if the page carries the marker; otherwise it gets its default */
+#define SETTINGS_REG_INFO_RXEQPAGE                          0xCB
+#define SETTINGS_REG_INFO_RXEQPAGE_DEFAULT                  SETTINGS_REG_INFO_RXEQPAGE_MARKER
+#define SETTINGS_REG_INFO_RXEQPAGE_MARKER                   ( (((uint32_t) 'R') <<  0) | \
+                                                              (((uint32_t) 'X') <<  8) | \
+                                                              (((uint32_t) 'E') << 16) | \
+                                                              (((uint32_t) 'Q') << 24) )
+
+/* RX equaliser CPU cost (read only): cycles spent on the equaliser per ADC sample, measured
+ * with the DWT cycle counter around the equaliser in each 1 ms block and divided by the block
+ * length (72 cycles = 1 us; one sample period at 48 kHz is 1500 cycles). The maximum since
+ * recording started (the most expensive block's average, sticks at 0xFFFF) and the average
+ * over the last 4096 samples or more. Copied like SETTINGS_REG_INFO_RXEQ */
+#define SETTINGS_REG_INFO_RXEQCYC                           0xCC
+#define SETTINGS_REG_INFO_RXEQCYC_DEFAULT                   0
+#define SETTINGS_REG_INFO_RXEQCYC_MAX_OFFS                  0
+#define SETTINGS_REG_INFO_RXEQCYC_MAX_MASK                  0x0000FFFFUL
+#define SETTINGS_REG_INFO_RXEQCYC_AVG_OFFS                  16
+#define SETTINGS_REG_INFO_RXEQCYC_AVG_MASK                  0xFFFF0000UL
+
+/* Audio CPU cost (read only): cycles the recording (RX) block interrupt takes per block, from
+ * the ADC buffer to USB (VCOS check, RX equaliser, volume), measured with the DWT cycle
+ * counter. A block is 1 ms of audio (48 samples at 48 kHz, 72000 cycles of time). The maximum
+ * since recording started (sticks at 0xFFFF) and the average over the last 4096 samples or
+ * more. Updated at every block, so only while recording runs; zero after power-up */
+#define SETTINGS_REG_INFO_RXCYC                             0xCD
+#define SETTINGS_REG_INFO_RXCYC_DEFAULT                     0
+#define SETTINGS_REG_INFO_RXCYC_MAX_OFFS                    0
+#define SETTINGS_REG_INFO_RXCYC_MAX_MASK                    0x0000FFFFUL
+#define SETTINGS_REG_INFO_RXCYC_AVG_OFFS                    16
+#define SETTINGS_REG_INFO_RXCYC_AVG_MASK                    0xFFFF0000UL
+
+/* Audio CPU cost (read only): cycles the playback (TX) block interrupt takes per block, from
+ * USB to the DAC buffer (VPTT check, volume, TX equaliser), measured with the DWT cycle
+ * counter. A block is 1 ms of audio (48 samples at 48 kHz, 72000 cycles of time). The maximum
+ * since playback started (sticks at 0xFFFF) and the average over the last 4096 samples or
+ * more. Updated at every block, so only while playback runs; zero after power-up */
+#define SETTINGS_REG_INFO_TXCYC                             0xCE
+#define SETTINGS_REG_INFO_TXCYC_DEFAULT                     0
+#define SETTINGS_REG_INFO_TXCYC_MAX_OFFS                    0
+#define SETTINGS_REG_INFO_TXCYC_MAX_MASK                    0x0000FFFFUL
+#define SETTINGS_REG_INFO_TXCYC_AVG_OFFS                    16
+#define SETTINGS_REG_INFO_TXCYC_AVG_MASK                    0xFFFF0000UL
+
+/* Reset diagnostics (read only, see diag.h and tools/aioc_eq.py diag): why the AIOC last
+ * reset. Taken at boot from a RAM record that survives every reset but a power-on, and put
+ * back after every recall or "load defaults". 15 registers, unused in v1.4.1 and every
+ * upstream branch */
+#define SETTINGS_REG_INFO_DIAG                              0xE0
+#define SETTINGS_REG_INFO_DIAG_COUNT                        15
+/* 0xE0: marker, always "DIAG" (0x47414944) on firmware that has these registers */
+#define SETTINGS_REG_INFO_DIAG_MARKER                       ( (((uint32_t) 'D') <<  0) | \
+                                                              (((uint32_t) 'I') <<  8) | \
+                                                              (((uint32_t) 'A') << 16) | \
+                                                              (((uint32_t) 'G') << 24) )
+/* 0xE1 DIAGRESET: resets since power-on (bits 0-15, sticks at 0xFFFF), a crash record is
+ * present (bit 16), the host asked for the reboot (bit 17), the RAM record survived so the
+ * counts, breadcrumbs and crash record mean something (bit 18), and RCC->CSR as read at boot
+ * (bits 23-31 in place: 23 V18PWRRSTF, 25 OBLRSTF, 26 PINRSTF, 27 PORRSTF, 28 SFTRSTF,
+ * 29 IWDGRSTF, 30 WWDGRSTF, 31 LPWRRSTF) */
+#define SETTINGS_REG_INFO_DIAGRESET                         0xE1
+#define SETTINGS_REG_INFO_DIAGRESET_COUNT_MASK              0x0000FFFFUL
+#define SETTINGS_REG_INFO_DIAGRESET_FAULT_MASK              0x00010000UL
+#define SETTINGS_REG_INFO_DIAGRESET_REBOOT_MASK             0x00020000UL
+#define SETTINGS_REG_INFO_DIAGRESET_VALID_MASK              0x00040000UL
+#define SETTINGS_REG_INFO_DIAGRESET_CSR_MASK                0xFF800000UL
+/* 0xE2 DIAGFAULT: the exception that recorded the crash (bits 0-8, IPSR: 3 HardFault,
+ * 4 MemManage, 5 BusFault, 6 UsageFault, 16 and up an unexpected interrupt, IRQ n - 16) and
+ * faults since power-on (bits 16-31) */
+#define SETTINGS_REG_INFO_DIAGFAULT                         0xE2
+#define SETTINGS_REG_INFO_DIAGFAULT_EXC_MASK                0x000001FFUL
+#define SETTINGS_REG_INFO_DIAGFAULT_COUNT_OFFS              16
+#define SETTINGS_REG_INFO_DIAGFAULT_COUNT_MASK              0xFFFF0000UL
+/* 0xE3 to 0xEA: the crash record, zero if none: stacked PC, LR and xPSR, then SCB CFSR, HFSR,
+ * MMFAR, BFAR and the EXC_RETURN value */
+#define SETTINGS_REG_INFO_DIAGPC                            0xE3
+#define SETTINGS_REG_INFO_DIAGLR                            0xE4
+#define SETTINGS_REG_INFO_DIAGXPSR                          0xE5
+#define SETTINGS_REG_INFO_DIAGCFSR                          0xE6
+#define SETTINGS_REG_INFO_DIAGHFSR                          0xE7
+#define SETTINGS_REG_INFO_DIAGMMFAR                         0xE8
+#define SETTINGS_REG_INFO_DIAGBFAR                          0xE9
+#define SETTINGS_REG_INFO_DIAGEXCRET                        0xEA
+/* 0xEB DIAGUPTIME: ms from boot to the last 1 ms tick before the reset */
+#define SETTINGS_REG_INFO_DIAGUPTIME                        0xEB
+/* 0xEC DIAGAGE0 and 0xED DIAGAGE1: for the main loop (0xEC bits 0-15), the USB interrupt
+ * (0xEC bits 16-31), the recording interrupt (0xED bits 0-15) and the playback interrupt (0xED
+ * bits 16-31; both the DMA block interrupts), how many ms before that last tick each last ran; 0xFFFF if not since boot (or that
+ * long or longer) */
+#define SETTINGS_REG_INFO_DIAGAGE0                          0xEC
+#define SETTINGS_REG_INFO_DIAGAGE1                          0xED
+/* 0xEE DIAGSTACK: bytes at the bottom of the stack the last run never used (bits 0-15; 0
+ * means it reached the bottom and probably overflowed into .bss; 0xFFFF unknown, after a
+ * power-on) and the stack size in bytes (bits 16-31) */
+#define SETTINGS_REG_INFO_DIAGSTACK                         0xEE
+/* 0xEF DIAGLOOPS (live, not from the last run): main-loop passes in the last whole second,
+ * updated every second. Each pass refreshes the watchdog; if the interrupts left the main
+ * loop no time, this would fall towards 0 before a watchdog reset */
+#define SETTINGS_REG_INFO_DIAGLOOPS                         0xEF
 
 /* UAC audio debug register 0 */
 #define SETTINGS_REG_INFO_AUDIO0                            0xD0
@@ -457,7 +607,8 @@ extern uint32_t settingsRegMap[SETTINGS_REGMAP_SIZE];
 /* Audio debug register 10 */
 #define SETTINGS_REG_INFO_AUDIO10                           0xDA
 #define SETTINGS_REG_INFO_AUDIO10_DEFAULT                   0
-/* Average playback buffer level */
+/* Average playback buffer level, in bytes: the USB FIFO plus what the DMA buffer still holds to
+ * play. The feedback endpoint holds it at 5 frames plus one block (576 at 48 kHz) */
 #define SETTINGS_REG_INFO_AUDIO10_PLAYBUFAVG_OFFS           0
 #define SETTINGS_REG_INFO_AUDIO10_PLAYBUFAVG_MASK           0x0000FFFFUL
 

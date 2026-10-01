@@ -1,3 +1,7 @@
 test_tx_eq
 test_settings_page
 test_settings_page_off
+test_rx_eq
+test_rx_eq_core
+test_diag
+test_audio_block

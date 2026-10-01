@@ -1,5 +1,6 @@
 #include "settings.h"
 #include "settings_page.h"
+#include "diag.h"
 #include <assert.h>
 #include "stm32f3xx_hal.h"
 
@@ -87,8 +88,13 @@ void Settings_Recall(void)
 
     if ( page[SETTINGS_REG_MAGIC] == SETTINGS_REG_MAGIC_DEFAULT ) {
         /* The whole page, except that the TX equaliser registers of a page stored by firmware
-         * without the equaliser (stock v1.4.x) get their defaults (settings_page.c) */
+         * without the equaliser (stock v1.4.x), and the RX equaliser control of a page stored by
+         * firmware without that (stock, aioc-packet up to v1.4.1-packet.2), get their defaults
+         * (settings_page.c) */
         SettingsPage_Load(settingsRegMap, page);
+
+        /* The page holds whatever these showed when it was stored: put this boot's back */
+        Diag_Publish(&settingsRegMap[SETTINGS_REG_INFO_DIAG], &diagBoot);
     } else {
         /* Magic token not found, assume flash is unprogrammed */
         Settings_Default();
@@ -137,9 +143,9 @@ void Settings_Default(void)
     settingsRegMap[SETTINGS_REG_FOXHUNT_MSG2] = SETTINGS_REG_FOXHUNT_MSG2_DEFAULT;
     settingsRegMap[SETTINGS_REG_FOXHUNT_MSG3] = SETTINGS_REG_FOXHUNT_MSG3_DEFAULT;
 
-    /* TX equaliser registers. Coefficients first, then the control word that commits them,
-     * with interrupts held off so that a "load defaults" during playback can never latch a
-     * half-written set. */
+    /* TX and RX equaliser registers. TX coefficients first, then the control word that commits
+     * them, with interrupts held off so that a "load defaults" during playback can never latch
+     * a half-written set. */
     {
         uint32_t primask = __get_PRIMASK();
         __disable_irq();
@@ -151,6 +157,14 @@ void Settings_Default(void)
     settingsRegMap[SETTINGS_REG_INFO_AIOC0] = SETTINGS_REG_INFO_AIOC0_DEFAULT;
     settingsRegMap[SETTINGS_REG_INFO_TXEQ] = SETTINGS_REG_INFO_TXEQ_DEFAULT;
     settingsRegMap[SETTINGS_REG_INFO_TXEQPAGE] = SETTINGS_REG_INFO_TXEQPAGE_DEFAULT;
+    settingsRegMap[SETTINGS_REG_INFO_RXEQ] = SETTINGS_REG_INFO_RXEQ_DEFAULT;
+    settingsRegMap[SETTINGS_REG_INFO_RXEQPAGE] = SETTINGS_REG_INFO_RXEQPAGE_DEFAULT;
+    settingsRegMap[SETTINGS_REG_INFO_RXEQCYC] = SETTINGS_REG_INFO_RXEQCYC_DEFAULT;
+    settingsRegMap[SETTINGS_REG_INFO_RXCYC] = SETTINGS_REG_INFO_RXCYC_DEFAULT;
+    settingsRegMap[SETTINGS_REG_INFO_TXCYC] = SETTINGS_REG_INFO_TXCYC_DEFAULT;
+
+    /* Reset diagnostics: what this boot found */
+    Diag_Publish(&settingsRegMap[SETTINGS_REG_INFO_DIAG], &diagBoot);
 
     /* Audio Debug registers */
     settingsRegMap[SETTINGS_REG_INFO_AUDIO0] = SETTINGS_REG_INFO_AUDIO0_DEFAULT;

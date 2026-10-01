@@ -35,7 +35,7 @@ SOFTWARE.
 ENTRY(Reset_Handler)
 
 /* Highest address of the user mode stack */
-_estack = 0x20004000;    /* end of 16K RAM */
+_estack = 0x20003F80;    /* end of 16K RAM, less 128 bytes for .noinit above the stack */
 
 /* Generate a link error if heap and stack don't fit into RAM */
 _Min_Heap_Size = 0;      /* required amount of heap  */
@@ -45,7 +45,8 @@ _Min_Stack_Size = 0x100; /* required amount of stack */
 MEMORY
 {
   FLASH (rx)      : ORIGIN = 0x08000000, LENGTH = 128K
-  RAM (xrw)       : ORIGIN = 0x20000000, LENGTH = 16K
+  RAM (xrw)       : ORIGIN = 0x20000000, LENGTH = 16K - 128
+  NOINIT (xrw)    : ORIGIN = 0x20003F80, LENGTH = 128
 }
 
 /* Define output sections */
@@ -160,6 +161,17 @@ SECTIONS
     . = . + _Min_Stack_Size;
     . = ALIGN(4);
   } >RAM
+
+  /* aioc-packet: RAM that the startup code neither copies nor zeroes, so it survives a reset
+   * (not a power-on): the reset diagnostics record (diag.h). At the very top of RAM, above
+   * the stack, so a stack overflow runs into .bss instead */
+  .noinit (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.noinit)
+    *(.noinit*)
+    . = ALIGN(4);
+  } >NOINIT
 
   /* Remove information from the standard libraries */
   /DISCARD/ :

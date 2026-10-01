@@ -4,6 +4,7 @@
 #include "led.h"
 #include "usb.h"
 #include "fox_hunt.h"
+#include "diag.h"
 #include <assert.h>
 #include <io.h>
 #include <stdio.h>
@@ -19,6 +20,17 @@
 #endif
 
 #define USB_RESET_DELAY     100 /* ms */
+
+/* Reset diagnostics (diag.h). The record lives in .noinit at the top of RAM, which the
+ * startup code neither copies nor zeroes, so it survives every reset but a power-on */
+diag_record_t diagRecord __attribute__((section(".noinit")));
+diag_snapshot_t diagBoot;
+volatile uint32_t mainLoopPasses;
+
+_Static_assert(RCC_CSR_PORRSTF == 0x08000000UL, "diag.c assumes this PORRSTF");
+_Static_assert(SETTINGS_REG_INFO_DIAG_COUNT == DIAG_REG_COUNT, "diag register count differs");
+_Static_assert(SETTINGS_REG_INFO_DIAGAGE1 == SETTINGS_REG_INFO_DIAG + DIAG_REG_AGE1, "diag register map differs");
+_Static_assert(SETTINGS_REG_INFO_DIAG_MARKER == DIAG_MAGIC, "diag marker differs");
 
 static void SystemClock_Config(void)
 {
@@ -79,6 +91,22 @@ static void SystemClock_Config(void)
 
 static void SystemReset(void) {
     uint32_t resetFlags = RCC->CSR;
+
+    /* What the last run left, before the flags are cleared (published to the settings
+     * registers by Settings_Init): the record, and how much of the stack it never used. Then
+     * paint the stack again, all but the top, which this boot is using now */
+    {
+        extern uint32_t _ebss;      /* the stack runs from here ... */
+        extern uint32_t _estack;    /* ... up to here (linker script) */
+        uint32_t *bottom = &_ebss;
+        uint32_t *top = &_estack;
+        uint32_t *inUse = (uint32_t *) (__get_MSP() & ~3UL) - 32;
+
+        Diag_Boot(&diagRecord, &diagBoot, resetFlags);
+        diagBoot.stackUnused = Diag_StackUnused(bottom, inUse);
+        diagBoot.stackSize = (uint32_t) (top - bottom) * sizeof(uint32_t);
+        Diag_StackPaint(bottom, inUse);
+    }
 
     /* Clear reset flags */
     RCC->CSR |= RCC_CSR_RMVF;
@@ -203,8 +231,13 @@ int main(void)
     };
     HAL_IWDG_Init(&IWDGHandle);
 
+    uint32_t loopsSecond = 0;
+
     while (1) {
         USB_Task();
+        USB_AudioTask();
+        IO_Task();
+        mainLoopPasses++;
 
         static uint32_t lastTick = 0;
         uint32_t nowTick = HAL_GetTick();
@@ -214,6 +247,10 @@ int main(void)
 
             /* 1 second timebase */
             FoxHunt_Tick();
+
+            /* Main-loop passes in the last second, for the reset diagnostics */
+            settingsRegMap[SETTINGS_REG_INFO_DIAGLOOPS] = mainLoopPasses - loopsSecond;
+            loopsSecond = mainLoopPasses;
 
 
             usb_audio_fbstats_t fb;
@@ -230,6 +267,7 @@ int main(void)
         }
 
         HAL_IWDG_Refresh(&IWDGHandle);
+        DIAG_CRUMB(mainTick);
     }
 
   return 0;
@@ -238,29 +276,43 @@ int main(void)
 void NMI_Handler(void) {
 }
 
-void HardFault_Handler(void) {
-    /* Go to infinite loop when Hard Fault exception occurs */
+/* Fault handlers: record the fault for the reset diagnostics, then spin as before, so the
+ * independent watchdog resets the AIOC about 150 ms later (the reset still shows as a
+ * watchdog reset, as on firmware without the record, and a debugger can still attach to the
+ * stopped state). Each entry picks the stack the exception frame went to (MSP or PSP, from
+ * EXC_RETURN in LR) and passes it on. The handler for unexpected interrupts
+ * (Default_Handler in the startup code) comes here too. */
+void Diag_FaultEntry(uint32_t *frame, uint32_t excReturn) __attribute__((noreturn, used));
+void Diag_FaultEntry(uint32_t *frame, uint32_t excReturn)
+{
+    extern uint32_t _sdata;     /* start of RAM (linker script) */
+    extern uint32_t _estack;    /* top of the stack, just below .noinit */
+
+    Diag_RecordFault(&diagRecord, frame, excReturn, __get_IPSR(), SCB->CFSR, SCB->HFSR, SCB->MMFAR, SCB->BFAR,
+                     (uintptr_t) &_sdata, (uintptr_t) &_estack);
+    __DSB();
+
     while (1) {
     }
 }
 
-void MemManage_Handler(void) {
-    /* Go to infinite loop when Memory Manage exception occurs */
-    while (1) {
+#define FAULT_ENTRY(name) \
+    __attribute__((naked)) void name(void) \
+    { \
+        __asm volatile ( \
+            "tst   lr, #4            \n" \
+            "ite   eq                \n" \
+            "mrseq r0, msp           \n" \
+            "mrsne r0, psp           \n" \
+            "mov   r1, lr            \n" \
+            "b     Diag_FaultEntry   \n" \
+        ); \
     }
-}
 
-void BusFault_Handler(void) {
-    /* Go to infinite loop when Bus Fault exception occurs */
-    while (1) {
-    }
-}
-
-void UsageFault_Handler(void) {
-    /* Go to infinite loop when Usage Fault exception occurs */
-    while (1) {
-    }
-}
+FAULT_ENTRY(HardFault_Handler)
+FAULT_ENTRY(MemManage_Handler)
+FAULT_ENTRY(BusFault_Handler)
+FAULT_ENTRY(UsageFault_Handler)
 
 void SVC_Handler(void) {
 }
@@ -273,5 +325,6 @@ void PendSV_Handler(void) {
 
 void SysTick_Handler(void) {
     HAL_IncTick();
+    diagRecord.tick = HAL_GetTick();
 }
 

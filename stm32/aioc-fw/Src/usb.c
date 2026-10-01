@@ -5,6 +5,7 @@
 #include "usb_serial.h"
 #include "usb_audio.h"
 #include "usb_hid.h"
+#include "diag.h"
 
 // FIXME: Do all three need to be handled, or just the LP one?
 // USB high-priority interrupt (Channel 74): Triggered only by a correct
@@ -12,6 +13,7 @@
 // the highest possible transfer rate.
 void USB_HP_IRQHandler(void)
 {
+  DIAG_CRUMB(usbTick);
   tud_int_handler(0);
 }
 
@@ -20,6 +22,7 @@ void USB_HP_IRQHandler(void)
 // interrupt source before serving the interrupt.
 void USB_LP_IRQHandler(void)
 {
+  DIAG_CRUMB(usbTick);
   tud_int_handler(0);
 }
 
