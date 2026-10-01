@@ -28,8 +28,10 @@ K5 = aioc_eq.PROFILES["k5-red"]
 class FakeAioc:
     """The firmware side of the HID feature report."""
 
-    def __init__(self, rx=True):
+    def __init__(self, rx=True, live=None):
         self.rx = rx                    # firmware with the receive equaliser
+        self.live = rx if live is None else live    # updates 0xEF (main-loop passes) every second
+        self.reads = []                 # addresses read, in order
         self.ram = self.defaults()
         self.flash = None               # nothing stored: the page is erased
         self.addr = 0
@@ -56,6 +58,7 @@ class FakeAioc:
         return 7
 
     def get_feature_report(self, report_id, size):
+        self.reads.append(self.addr)
         v = self.ram[self.addr]
         return [0, 0, self.addr, v & 0xFF, v >> 8 & 0xFF, v >> 16 & 0xFF, v >> 24 & 0xFF]
 
@@ -75,6 +78,11 @@ class FakeAioc:
             ram[aioc_eq.REG_RXPAGE] = aioc_eq.RXPAGE_MARKER
         return ram
 
+    def wait(self, seconds):
+        """time.sleep in the tool: a live firmware has counted another second's passes"""
+        if self.live:
+            self.ram[aioc_eq.D_LOOPS] += 1
+
     def writes(self):
         return [(a, v) for c, a, v in self.log if c & 0x01]
 
@@ -92,6 +100,7 @@ class ToolCase(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"hid": fake_hid(dev)}), \
              mock.patch("sys.stdin.isatty", return_value=stdin_tty), \
              mock.patch("builtins.input", return_value=answer), \
+             mock.patch("time.sleep", side_effect=dev.wait), \
              contextlib.redirect_stdout(out):
             aioc_eq.main(list(args))
         return out.getvalue()
@@ -101,6 +110,7 @@ class ToolTests(ToolCase):
 
     def test_apply_writes_only_eq_registers_control_last(self):
         dev = FakeAioc()
+        dev.ram[0xB0:0xC0] = [0] * 16       # stored off
         self.run_tool(dev, "apply", "k5-red")
         w = dev.writes()
         self.assertTrue(all(a in aioc_eq.EQ_REGS for a, _ in w))
@@ -200,7 +210,7 @@ class RxTests(ToolCase):
         self.assertEqual(dev.writes(), [(0xAF, 0)], "already off: no write")
         self.run_tool(dev, "rx", "on")
         self.assertEqual(dev.writes(), [(0xAF, 0), (0xAF, 1)])
-        self.assertEqual(dev.ram[0xB0:0xC0], [0] * 16, "the TX registers were touched")
+        self.assertEqual(dev.ram[0xB0:0xC0], K5["coefs"] + [K5["ctrl"]], "the TX registers were touched")
 
     def test_rx_off_store(self):
         dev = FakeAioc()
@@ -211,18 +221,52 @@ class RxTests(ToolCase):
         dev.send_feature_report([0, 0x40, 0, 0, 0, 0, 0])
         self.assertEqual(dev.ram[0xAF], 0)
 
-    def test_tx_store_lists_rx_off_as_another_change(self):
+    def test_tx_store_says_how_rx_is_stored(self):
         dev = FakeAioc()
         self.run_tool(dev, "rx", "off")
         out = self.run_tool(dev, "apply", "k5-red", "--store", "--yes")
-        self.assertIn("receive equaliser", out)
+        self.assertIn("The receive equaliser is stored as it is now: off.", out)
+        self.assertIn("Every other setting is at its firmware default", out)
+        self.assertNotIn("0xAF", out)
         self.assertEqual(dev.flash[0xAF], 0)
 
-    def test_rx_store_lists_tx_change_as_another_change(self):
+    def test_rx_store_says_how_tx_is_stored(self):
         dev = FakeAioc()
-        self.run_tool(dev, "apply", "k5-red")
+        self.run_tool(dev, "off")
         out = self.run_tool(dev, "rx", "off", "--store", "--yes")
-        self.assertIn("0xB0", out)
+        self.assertIn("The transmit equaliser is stored as it is now: off.", out)
+        self.assertNotIn("0xB0", out)
+
+    def test_store_on_factory_defaults_lists_nothing_else(self):
+        # A factory-default AIOC holds k5-red in 0xB0 to 0xBF: those are defaults, not changes
+        dev = FakeAioc()
+        out = self.run_tool(dev, "rx", "off", "--store", "--yes")
+        self.assertNotIn("0xB", out)
+        self.assertIn("The transmit equaliser is stored as it is now: k5-red", out)
+        self.assertIn("Every other setting is at its firmware default", out)
+        dev = FakeAioc()
+        out = self.run_tool(dev, "apply", "k5-red", "--store", "--yes")
+        self.assertIn("The receive equaliser is stored as it is now: on (UV-K5 profile).", out)
+        self.assertIn("Every other setting is at its firmware default", out)
+        self.assertEqual(aioc_eq.other_changes({a: dev.ram[a] for a in aioc_eq.WRITABLE}), {})
+
+    def test_store_on_firmware_without_rx_says_nothing_about_it(self):
+        dev = FakeAioc(rx=False)
+        out = self.run_tool(dev, "apply", "k5-red", "--store", "--yes")
+        self.assertNotIn("receive equaliser", out)
+
+    def test_stale_rx_marker(self):
+        # Downgraded firmware loaded a page stored by this one: the marker is there, but nothing
+        # updates the registers
+        dev = FakeAioc(rx=False)
+        dev.ram[aioc_eq.REG_RXPAGE] = aioc_eq.RXPAGE_MARKER
+        dev.ram[aioc_eq.D_LOOPS] = 123456
+        with self.assertRaises(SystemExit) as cm:
+            self.run_tool(dev, "rx", "status")
+        self.assertIn("copy", str(cm.exception))
+        self.assertNotIn("Receive equaliser", self.run_tool(dev, "status"))
+        self.assertGreaterEqual(dev.reads.count(aioc_eq.D_LOOPS), 1 + aioc_eq.LIVE_TRIES)
+        self.assertEqual(dev.writes(), [])
 
     def test_rx_refused_on_firmware_without_it(self):
         dev = FakeAioc(rx=False)
@@ -255,6 +299,19 @@ class RxTests(ToolCase):
         self.assertIn("overload guard switched it off", out)
         self.assertIn("switched it off 2 time(s)", out)
         self.assertEqual(dev.writes(), [])
+
+    def test_recording_state_with_vptt_bit(self):
+        # Earlier firmware ORs the virtual PTT state into bit 0 of the record state field
+        dev = FakeAioc()
+        dev.ram[0xD2] = 48000
+        dev.ram[0xCA] = 0x00000101
+        for field, recording in ((2, True), (3, True), (1, False), (0, False)):
+            dev.ram[0xD0] = field << 24
+            out = self.run_tool(dev, "rx", "status")
+            self.assertEqual("Not recording now" not in out, recording, f"record state {field}")
+        dev.ram[0xD0] = 3 << 28                 # playing, with the virtual COS bit
+        dev.ram[0xC8] = 0x1307
+        self.assertNotIn("Not playing audio now", self.run_tool(dev, "status"))
 
     def test_rx_arguments(self):
         dev = FakeAioc()
@@ -353,6 +410,13 @@ class DiagTests(ToolCase):
         self.assertIn("playback: 7200 cycles per 1 ms block on average (10% of the processor), 65535 or more", out)
         self.assertIn("Both directions together: 30% on average", out)
         self.assertNotIn("Audio processing", self.diag(FakeAioc()), "no diagnostics, no CPU lines")
+
+    def test_stale_diagnostics(self):
+        dev = self.device(reset=IWDG | VALID | 1, loops=5000)
+        dev.live = False
+        out = self.diag(dev)
+        self.assertIn("hold a copy", out)
+        self.assertNotIn("Last reset", out)
 
     def test_diag_takes_no_arguments(self):
         with self.assertRaises(SystemExit):

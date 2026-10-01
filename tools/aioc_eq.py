@@ -26,11 +26,16 @@ power-up (by this or any other tool) is stored too. The tool lists those first a
 The tool only ever touches the equaliser registers: 0xB0 to 0xBF for transmit, 0xAF for
 receive. It never changes the PTT mapping or any other setting.
 
+Commands that look for the receive equaliser or the reset diagnostics take a second or two:
+besides their markers, the tool checks that the firmware really updates them, because a
+settings page stored by a newer aioc-packet carries the markers into older firmware too.
+
 Needs Python 3.8 or later and hidapi (pip install hidapi). On Linux your user needs access
 to the AIOC's hidraw device (see README.md) or run it with sudo.
 """
 import argparse
 import sys
+import time
 
 VID, PID = 0x1209, 0x7388
 
@@ -59,6 +64,12 @@ BLOCK_CYCLES = 72000            # one 1 ms block at 72 MHz
 REG_DIAG = 0xE0
 DIAG_REGS = range(0xE0, 0xF0)
 DIAG_MARKER = 0x47414944        # "DIAG", little-endian
+# Firmware with the receive equaliser and the diagnostics updates D_LOOPS every second. A
+# firmware without them (after a downgrade) keeps whatever a stored settings page held at those
+# addresses, markers included, so a marker alone could be a stale copy: the tool also checks
+# that D_LOOPS changes (live_firmware)
+LIVE_WAIT = 1.1                 # s between reads of D_LOOPS
+LIVE_TRIES = 2                  # waits before deciding it is not live (one second's count could repeat)
 (D_MARKER, D_RESET, D_FAULT, D_PC, D_LR, D_XPSR, D_CFSR, D_HFSR, D_MMFAR, D_BFAR, D_EXCRET, D_UPTIME,
  D_AGE0, D_AGE1, D_STACK, D_LOOPS) = range(0xE0, 0xF0)
 CSR_FLAGS = [(31, "LPWRRSTF", "low-power reset"), (30, "WWDGRSTF", "window watchdog"),
@@ -113,14 +124,15 @@ PROFILES = {
     },
 }
 
-# Firmware defaults outside the equaliser block (settings.h, unchanged from v1.4.1). Every
-# other writable register outside that block defaults to 0. Used only to point out what else
-# a store would persist.
+# Firmware defaults (settings.h): v1.4.1's, plus both equalisers on (the transmit equaliser
+# with k5-red). Every other writable register defaults to 0. Used only to point out what else a
+# store would persist.
 DEFAULTS = {
     0x00: MAGIC, 0x08: 0x73881209, 0x24: 0x00000404, 0x25: 0x00000008,
     0x44: 0x00020000, 0x45: 0x01000000, 0x60: 0x00010100, 0x64: 0x01000000,
     0x82: 0x00000010, 0x84: 0x00000140, 0x92: 0x00000100, 0x94: 0x00000C80,
     0xA0: 0x80001400, REG_RXCTRL: RX_K5,
+    **dict(zip(EQ_REGS, PROFILES["k5-red"]["coefs"] + [PROFILES["k5-red"]["ctrl"]])),
 }
 NAMES = {
     0x00: "magic", 0x08: "USB VID/PID", 0x24: "PTT1 source", 0x25: "PTT2 source",
@@ -144,6 +156,7 @@ class Aioc:
 
     def __init__(self, device):
         self.dev = device
+        self.live = None                # live_firmware's answer, once known
 
     def read(self, addr):
         self.dev.send_feature_report([0x00, 0x00, addr, 0, 0, 0, 0])
@@ -259,10 +272,10 @@ def switch_off(aioc):
 
 
 def other_changes(snapshot, own=EQ_REGS):
-    """Writable registers outside the ones being changed (own) that differ from the firmware
-    defaults."""
+    """Writable registers outside both equalisers' that differ from the firmware defaults. The
+    equaliser not being changed (other than own) is described on its own line instead."""
     return {a: v for a, v in snapshot.items()
-            if a not in own and v != DEFAULTS.get(a, 0)}
+            if a not in EQ_REGS and a not in RX_REGS and v != DEFAULTS.get(a, 0)}
 
 
 def store(aioc, assume_yes, own=EQ_REGS):
@@ -272,6 +285,11 @@ def store(aioc, assume_yes, own=EQ_REGS):
     print("About to store to the AIOC's flash. This writes the whole settings page as it is in")
     print("RAM right now, not just this equaliser, and it is what the AIOC will load at every")
     print("power-up from now on. Do it while no audio is playing and the radio is not transmitting.")
+    if own is RX_REGS:
+        print("The transmit equaliser is stored as it is now: "
+              + describe([snapshot[a] for a in EQ_REGS]) + ".")
+    elif has_rx(aioc):
+        print(f"The receive equaliser is stored as it is now: {describe_rx(snapshot[REG_RXCTRL])}.")
     if others:
         print("These other settings differ from the firmware defaults and will be stored too:")
         for a, v in sorted(others.items()):
@@ -308,7 +326,7 @@ def status(aioc):
     running = bool(info & 0x4)
     gen = info >> 8 & 0xFF
     try:
-        playing = (aioc.read(0xD0) >> 28 & 0xF) == 2   # INFO_AUDIO0 play state: 2 = running
+        playing = running_state(aioc.read(REG_AUDIO0) >> 28)   # INFO_AUDIO0 play state
     except Exception:
         playing = True                                 # unknown: say nothing extra
     if not playing and (running or not (words[N_COEF] & 0x3)):
@@ -332,9 +350,37 @@ def status(aioc):
     print("firmware defaults if nothing is stored.")
 
 
+def running_state(field):
+    """True if an INFO_AUDIO0 play or record state field (shifted down) says running (2). Earlier
+    firmware, like upstream, also ORs the virtual PTT or COS state into bit 0 of these fields,
+    so running shows as 2 or 3 there: test bit 1."""
+    return bool(field & 0x2)
+
+
+def live_firmware(aioc):
+    """True if the firmware updates D_LOOPS (main-loop passes per second), so its markers are
+    its own and not a stale copy from a stored settings page. Takes a second or two, once."""
+    if aioc.live is None:
+        first = aioc.read(D_LOOPS)
+        aioc.live = False
+        for _ in range(LIVE_TRIES):
+            time.sleep(LIVE_WAIT)
+            if aioc.read(D_LOOPS) != first:
+                aioc.live = True
+                break
+    return aioc.live
+
+
+def rx_support(aioc):
+    """"yes" if the firmware has the receive equaliser (it holds the "RXEQ" marker and is live),
+    "stale" if the marker is only a copy from a stored page, "no" if there is no marker."""
+    if aioc.read(REG_RXPAGE) != RXPAGE_MARKER:
+        return "no"
+    return "yes" if live_firmware(aioc) else "stale"
+
+
 def has_rx(aioc):
-    """True if the firmware has the receive equaliser (it holds the "RXEQ" marker)."""
-    return aioc.read(REG_RXPAGE) == RXPAGE_MARKER
+    return rx_support(aioc) == "yes"
 
 
 def describe_rx(ctrl):
@@ -361,12 +407,12 @@ def rx_status(aioc):
     cyc = aioc.read(REG_RXCYC)
     print(f"Receive equaliser: {describe_rx(ctrl)} (register 0xAF = 0x{ctrl:08X})")
     try:
-        recording = (aioc.read(REG_AUDIO0) >> 24 & 0xF) == 2   # INFO_AUDIO0 record state: 2 = running
+        recording = running_state(aioc.read(REG_AUDIO0) >> 24)   # INFO_AUDIO0 record state
         rate = aioc.read(REG_AUDIO2)
     except Exception:
         recording, rate = True, 0                              # unknown: say nothing extra
     if not recording:
-        print("Not recording now: the running state below is as of the last recording since power-up,")
+        print("Not recording now: the running state below is as of the last recording since the AIOC started,")
         print("and a change takes effect when recording next starts.")
     if info & 0x100:
         clips = info >> 16
@@ -392,7 +438,8 @@ def rx_status(aioc):
         print("Running now: no (off)")
     overloads = info >> 11 & 0x1F
     if overloads:
-        print(f"Overload guard: switched it off {overloads}{'+' if overloads == 31 else ''} time(s) since power-up.")
+        print(f"Overload guard: switched it off {overloads}{'+' if overloads == 31 else ''} time(s) since the AIOC "
+              "last started (power-up or a reset).")
     print("This is the value in RAM. At power-up the AIOC loads its stored settings, or the")
     print("firmware default (on) if nothing is stored.")
 
@@ -521,13 +568,13 @@ def fmt_ms(ms):
 def cpu_lines(rx, tx):
     """Plain-words lines for the audio block cycle registers (REG_RXBLK, REG_TXBLK)."""
     if not rx and not tx:
-        return ["Audio processing: no figures (no audio since power-up, or firmware that processes audio "
+        return ["Audio processing: no figures (no audio since the AIOC started, or firmware that processes audio "
                 "sample by sample and does not count it)."]
     lines = []
     for name, w in (("recording", rx), ("playback", tx)):
         cmax, cavg = w & 0xFFFF, w >> 16
         if not w:
-            lines.append(f"Audio processing, {name}: no figures yet (not since power-up).")
+            lines.append(f"Audio processing, {name}: no figures yet (not since the AIOC started).")
             continue
         most = f"{cmax}{' or more' if cmax == 0xFFFF else ''}"
         lines.append(f"Audio processing, {name}: {cavg} cycles per 1 ms block on average "
@@ -542,6 +589,11 @@ def cpu_lines(rx, tx):
 
 def diag(aioc):
     regs = {a: aioc.read(a) for a in DIAG_REGS}
+    if regs[D_MARKER] == DIAG_MARKER and not live_firmware(aioc):
+        print("This AIOC's firmware has no reset diagnostics. Registers 0xE0 to 0xEF hold a copy of")
+        print("them from a stored settings page (stored by a newer aioc-packet, before this firmware")
+        print("was flashed), so they say nothing about this AIOC now.")
+        return
     for line in describe_diag(regs):
         print(line)
     if regs[D_MARKER] == DIAG_MARKER:
@@ -622,7 +674,12 @@ def main(argv):
                 print("Not stored: at the next power-up the AIOC goes back to its stored setting (or its "
                       "default, k5-red). Add --store to keep this.")
         elif a.command == "rx":
-            if not has_rx(aioc):
+            support = rx_support(aioc)
+            if support == "stale":
+                raise SystemExit("this AIOC's firmware has no receive equaliser. Its registers hold a copy "
+                                 "of the receive equaliser's marker from a stored settings page (stored by a "
+                                 "newer aioc-packet, before this firmware was flashed), but nothing runs it")
+            if support != "yes":
                 raise SystemExit("this AIOC's firmware has no receive equaliser (it needs an aioc-packet "
                                  "release that has one)")
             if a.args[0] == "status":
